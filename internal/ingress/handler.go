@@ -4,11 +4,14 @@
 package ingress
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
@@ -38,7 +41,9 @@ const protocolVersionHeader = "MCP-Protocol-Version"
 //     forward; an invalid message is denied and nothing downstream runs.
 //  5. forward (F5) under the gateway service identity (invariant #3) — the
 //     caller credential never rides the forward.
-//  6. leak-free response (invariant #5) — only a stable reason class +
+//  6. F10 OCSF audit emit (NFR-SEC-03) — emit-before-ack, fail-closed
+//     durable-first: a durable-write failure refuses the request, never acks it.
+//  7. leak-free response (invariant #5) — only a stable reason class +
 //     correlation id reaches the caller, never internal identifiers.
 //
 // Every boundary fails closed (invariant #9): a non-success at any step refuses
@@ -48,19 +53,20 @@ type Handler struct {
 	validator *profile.Validator
 	forwarder forward.Forwarder
 	ceiling   *quota.Ceiling
+	emitter   *audit.Emitter
 }
 
-// NewHandler wires the handler from its seams. The first three are required; a nil
-// seam is a construction error, because a missing authenticator (admit-all),
-// validator (validate-nothing), or forwarder (no F5) would each silently defeat an
-// invariant. The ceiling is required too: a nil ceiling would remove the
-// per-caller fd fairness (invariant #8). Returning an error keeps the fail-closed
-// posture at construction.
-func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, forwarder forward.Forwarder, ceiling *quota.Ceiling) (*Handler, error) {
-	if authn == nil || validator == nil || forwarder == nil || ceiling == nil {
-		return nil, errors.New("ingress: NewHandler requires non-nil authn, validator, forwarder, and ceiling (fail-closed)")
+// NewHandler wires the handler from its seams. All are required; a nil seam is a
+// construction error, because a missing authenticator (admit-all), validator
+// (validate-nothing), forwarder (no F5), ceiling (no fd fairness, invariant #8),
+// or emitter (no F10 audit, so a forward could ack without a durable record —
+// NFR-SEC-03) would each silently defeat an invariant. Returning an error keeps
+// the fail-closed posture at construction.
+func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, forwarder forward.Forwarder, ceiling *quota.Ceiling, emitter *audit.Emitter) (*Handler, error) {
+	if authn == nil || validator == nil || forwarder == nil || ceiling == nil || emitter == nil {
+		return nil, errors.New("ingress: NewHandler requires non-nil authn, validator, forwarder, ceiling, and emitter (fail-closed)")
 	}
-	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling}, nil
+	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling, emitter: emitter}, nil
 }
 
 // ServeHTTP routes the MCP JSON-RPC POST surface. Only POST is accepted; the
@@ -140,7 +146,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (6) Leak-free response — invariant #5. Only the bounded result + the stable
+	// (6) F10 OCSF audit emit — emit-before-ack (NFR-SEC-03 fail-closed
+	// durable-first). The event is durably recorded BEFORE the 2xx; if the
+	// durable write fails, the request is REFUSED, not acknowledged, so a 200
+	// always means the action took effect AND was recorded. The actor is the
+	// host-attested caller principal (KeyID), never a body claim (NFR-SEC-09).
+	//
+	// The correlation id is the gateway's own per-request handle: audit MUST NOT
+	// depend on the upstream returning one (a terminated request is always
+	// recorded). If Control returned a correlation we adopt it; otherwise the
+	// gateway mints one so the event is always well-formed and the response
+	// carries a stable handle either way.
+	correlation := resp.Correlation
+	if correlation == "" {
+		correlation = newCorrelationID()
+		resp.Correlation = correlation
+	}
+	env := audit.Envelope{
+		TraceID:   correlation,
+		SessionID: correlation,
+		ActorID:   caller.KeyID,
+		Resource:  boundedResource(req.ToolCall.Name),
+		Action:    "tool_call",
+		Outcome:   audit.OutcomeSuccess,
+	}
+	if err := h.emitter.Emit(r.Context(), env); err != nil {
+		// Audit write failed → the request is refused, not acked (fail-closed).
+		writeRPCError(w, http.StatusInternalServerError, rpcInternalError, "audit write failed")
+		return
+	}
+
+	// (7) Leak-free response — invariant #5. Only the bounded result + the stable
 	// correlation id reach the caller.
 	writeResult(w, resp)
 }
@@ -156,6 +192,38 @@ func bearerFromHeader(r *http.Request) string {
 		return h[len(prefix):]
 	}
 	return ""
+}
+
+// newCorrelationID mints a per-request correlation handle (128-bit hex) when the
+// upstream did not supply one. It is a stable, leak-free reference id — NOT a
+// session id and carrying no internal topology (invariant #5). crypto/rand makes
+// it unguessable so it cannot be used to correlate across tenants.
+func newCorrelationID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// rand.Read does not fail in practice; if it ever did, a fixed non-empty
+		// placeholder keeps the envelope well-formed (audit still records the
+		// request) rather than dropping the event.
+		return "correlation-unavailable"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// boundedResource builds the audit resource string for a tool-call, bounded to
+// the AuditEnvelope resource limit so a long tool name cannot push the envelope
+// over its schema bound (the emitter would otherwise refuse it). An empty name
+// resolves to a stable placeholder so the required field is never empty.
+func boundedResource(toolName string) string {
+	const prefix = "tools/call:"
+	const max = 1024
+	if toolName == "" {
+		return prefix + "(unnamed)"
+	}
+	r := prefix + toolName
+	if len(r) > max {
+		return r[:max]
+	}
+	return r
 }
 
 // readBounded reads the request body under the MaxBytesReader cap. An oversized

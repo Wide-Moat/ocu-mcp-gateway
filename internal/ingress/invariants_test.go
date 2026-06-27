@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
@@ -44,7 +45,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 	}
 	h, err := NewHandler(
 		acceptAuth{caller: auth.Caller{KeyID: "k1", Tenant: "t1", Audience: "a1"}},
-		newValidator(t), fwd, ceiling,
+		newValidator(t), fwd, ceiling, newEmitter(t),
 	)
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
@@ -178,6 +179,61 @@ func TestInvariant9_FailClosedForward(t *testing.T) {
 	}
 }
 
+// F10 audit — emit-before-ack, fail-closed durable-first (NFR-SEC-03). A durable
+// audit-write failure REFUSES the request (500), never acks it with a 200, so a
+// 200 always means the action was durably recorded.
+func TestF10_AuditWriteFailureIsRefusal(t *testing.T) {
+	em, err := audit.NewEmitter(failingSink{})
+	if err != nil {
+		t.Fatalf("emitter: %v", err)
+	}
+	h, err := NewHandler(
+		acceptAuth{caller: auth.Caller{KeyID: "k1"}},
+		newValidator(t),
+		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}}, // forward SUCCEEDS
+		quota.NewCeiling(64), em,
+	)
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", validToolCall)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a forward that succeeds but whose audit write fails must be refused (500), got %d", rec.Code)
+	}
+}
+
+// F10 audit — the emitted actor is the host-attested caller (KeyID), never a body
+// claim (NFR-SEC-09). A capturing sink records the payload; the actor.user.uid
+// must be the resolved KeyID, and a body-supplied "caller" must NOT appear.
+func TestF10_AuditActorIsHostAttested(t *testing.T) {
+	sink := &capturingSink{}
+	em, _ := audit.NewEmitter(sink)
+	h, err := NewHandler(
+		acceptAuth{caller: auth.Caller{KeyID: "resolved-key-9"}},
+		newValidator(t),
+		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}},
+		quota.NewCeiling(64), em,
+	)
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	bodyWithClaim := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{},"caller":"admin"}}`
+	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", bodyWithClaim)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("happy path must be 200, got %d", rec.Code)
+	}
+	if len(sink.payloads) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(sink.payloads))
+	}
+	s := string(sink.payloads[0])
+	if !strings.Contains(s, "resolved-key-9") {
+		t.Error("audit actor must be the host-attested resolved KeyID")
+	}
+	if strings.Contains(s, "admin") {
+		t.Error("a body-supplied caller claim must NOT appear in the audit actor (NFR-SEC-09)")
+	}
+}
+
 // Sanity: the NewHandler constructor is fail-closed on any nil seam (admit-all /
 // validate-nothing / no-F5 / no-fairness would each defeat an invariant).
 func TestNewHandlerFailsClosedOnNilSeam(t *testing.T) {
@@ -185,20 +241,23 @@ func TestNewHandlerFailsClosedOnNilSeam(t *testing.T) {
 	fwd := &recordingForwarder{}
 	c := quota.NewCeiling(1)
 	a := acceptAuth{}
+	em := newEmitter(t)
 	cases := []struct {
 		name  string
 		authn auth.CallerAuthenticator
 		val   *profile.Validator
 		f     forward.Forwarder
 		cl    *quota.Ceiling
+		em    *audit.Emitter
 	}{
-		{"nil authn", nil, v, fwd, c},
-		{"nil validator", a, nil, fwd, c},
-		{"nil forwarder", a, v, nil, c},
-		{"nil ceiling", a, v, fwd, nil},
+		{"nil authn", nil, v, fwd, c, em},
+		{"nil validator", a, nil, fwd, c, em},
+		{"nil forwarder", a, v, nil, c, em},
+		{"nil ceiling", a, v, fwd, nil, em},
+		{"nil emitter", a, v, fwd, c, nil},
 	}
 	for _, tc := range cases {
-		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl); err == nil {
+		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl, tc.em); err == nil {
 			t.Errorf("%s: NewHandler must fail closed, got nil error", tc.name)
 		}
 	}

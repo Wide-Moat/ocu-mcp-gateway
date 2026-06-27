@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/boot"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/config"
@@ -60,6 +61,7 @@ type options struct {
 	identity    string
 	controlURL  string
 	connCeiling int
+	auditBus    string
 }
 
 func parseOptions(args []string) (options, error) {
@@ -73,6 +75,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.identity, "service-identity", "ocu-mcp-gateway", "gateway service identity name presented on F5")
 	fs.StringVar(&o.controlURL, "control-url", "", "Control/operator API base URL (F5 forward target)")
 	fs.IntVar(&o.connCeiling, "conn-ceiling", 64, "max concurrent in-flight requests per audience-validated caller (NFR-SEC-53)")
+	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in); empty fails closed on emit")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -146,8 +149,16 @@ func serve(ctx context.Context, o options) error {
 	// is a conservative per-caller concurrency bound the operator may retune.
 	ceiling := quota.NewCeiling(o.connCeiling)
 
+	// Build the F10 OCSF audit emitter over the durable bus sink. With no audit
+	// bus configured it fails closed on emit (a forward cannot ack without a
+	// durable record, NFR-SEC-03).
+	emitter, err := audit.NewEmitter(audit.NewBusSink(o.auditBus))
+	if err != nil {
+		return fmt.Errorf("serve: build audit emitter: %w", err)
+	}
+
 	// Compose the ingress handler.
-	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling)
+	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling, emitter)
 	if err != nil {
 		return fmt.Errorf("serve: build handler: %w", err)
 	}

@@ -50,6 +50,7 @@ func TestServeServesAndShutsDown(t *testing.T) {
 		newValidator(t),
 		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}},
 		quota.NewCeiling(64),
+		newEmitter(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
