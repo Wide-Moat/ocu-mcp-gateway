@@ -94,7 +94,7 @@ func assertNoCredentialField(t *testing.T, typ reflect.Type, path string) {
 		// Recurse into struct-typed and embedded fields so a nested credential
 		// field cannot hide.
 		ft := f.Type
-		if ft.Kind() == reflect.Ptr {
+		if ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
 		if ft.Kind() == reflect.Struct && ft != typ {
