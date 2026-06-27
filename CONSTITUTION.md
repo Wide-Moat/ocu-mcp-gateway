@@ -192,6 +192,26 @@ rewrite.
   `TestHashForRecordRejectsPrefixlessSecret`) and the boot-set loader
   `internal/config/loader_test.go`.
 
+## XI. F10 OCSF audit is emit-before-ack, fail-closed durable-first (NFR-SEC-03)
+
+Every terminated request is recorded as an OCSF ApiActivity event on the
+gateway's audit fan-in channel BEFORE the response is acknowledged; a durable
+audit-write failure REFUSES the request, never acks it. A 200 therefore always
+means the action took effect AND was durably recorded. The audit actor is the
+host-attested caller principal (the resolved KeyID), never a body claim
+(NFR-SEC-09). The per-source `sequence` is monotonic; the pipeline authors the
+hash-chain at ingest (the gateway supplies only the sequence). The contract is
+the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
+`mcpGatewayAudit`, payload OCSF ApiActivity).
+
+- **Enforcement:** `internal/ingress/invariants_test.go`
+  (`TestF10_AuditWriteFailureIsRefusal` — a forward that succeeds but whose audit
+  write fails is refused 500, not acked 200; planting an ignored emit error goes
+  RED) and (`TestF10_AuditActorIsHostAttested` — the emitted actor is the resolved
+  KeyID, a body `caller` claim does not appear). The emitter's own fail-closed
+  contract: `internal/audit/audit_test.go` (`TestEmitWriteFailureIsRefusal`,
+  `TestSequenceMonotonicAndUnique`, `TestEmitInvalidEnvelopeRefused`).
+
 ---
 
 ## Deferred (declared, not yet enforced)

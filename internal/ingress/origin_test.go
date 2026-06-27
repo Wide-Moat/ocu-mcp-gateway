@@ -23,6 +23,7 @@ func handlerWithOrigin(t *testing.T, allowed []string) *Handler {
 		&recordingForwarder{err: forward.ErrForwardFailed},
 		quota.NewCeiling(64),
 		NewOriginPolicy(allowed),
+		newEmitter(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
