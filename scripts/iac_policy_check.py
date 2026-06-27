@@ -44,6 +44,14 @@ def load(path):
         fail(f"manifest not found at {path} (fail-closed)")
     with open(path) as f:
         try:
+            # KNOWN LIMITATION: single-document parse. The shipped manifests are
+            # single-document. A multi-document YAML (`---`-separated) makes
+            # safe_load raise a ComposerError, which fails CLOSED here (a parse
+            # error reds the gate) — so a second operator-egress document does NOT
+            # bypass the gate; it is refused as unparseable rather than detected.
+            # If multi-document manifests are ever legitimized, switch to
+            # `yaml.safe_load_all` and iterate every document so a benign second
+            # document does not give a false RED.
             return yaml.safe_load(f)
         except yaml.YAMLError as e:
             fail(f"manifest {path} is not parseable YAML (fail-closed): {e}")
@@ -56,9 +64,46 @@ def k8s_permits_operator(doc):
         for peer in rule.get("to", []) or []:
             for sel_key in ("podSelector", "namespaceSelector"):
                 sel = peer.get(sel_key) or {}
-                labels = sel.get("matchLabels") or {}
-                if labels.get(OPERATOR_INGRESS_LABEL[0]) == OPERATOR_INGRESS_LABEL[1]:
+                if _selector_targets_operator(sel):
                     return True
+    return False
+
+
+def _selector_targets_operator(sel):
+    """Return True if a k8s label selector targets the operator ingress.
+
+    A k8s podSelector/namespaceSelector supports BOTH `matchLabels` (an equality
+    map) AND `matchExpressions` (a list of {key, operator, values}). Reading only
+    matchLabels would be a selector-island: an operator egress written as
+    `matchExpressions: [{key: ocu.dev/ingress, operator: In, values: [operator]}]`
+    is the SAME gateway->operator route and must be caught (NFR-SEC-52).
+    """
+    key, val = OPERATOR_INGRESS_LABEL
+
+    # matchLabels: an equality map.
+    labels = sel.get("matchLabels") or {}
+    if labels.get(key) == val:
+        return True
+
+    # matchExpressions: list of set-based requirements.
+    for expr in sel.get("matchExpressions") or []:
+        if expr.get("key") != key:
+            continue
+        op = expr.get("operator")
+        values = expr.get("values") or []
+        # `In [..., operator, ...]` selects the operator ingress.
+        if op == "In" and val in values:
+            return True
+        # `Exists` on the operator-ingress key selects every pod that carries it,
+        # including the operator ingress — treat as a match (fail-closed).
+        if op == "Exists":
+            return True
+        # KNOWN LIMITATION: a `NotIn`/`DoesNotExist` requirement that excludes
+        # everything EXCEPT the operator ingress would semantically select it too,
+        # but that inversion is not decidable from this rule alone (it depends on
+        # the cluster's full label space). It is not flagged here; an operator
+        # route is realistically expressed as In/Exists/matchLabels, all of which
+        # ARE caught. Documented so the gap is declared, not silent.
     return False
 
 
@@ -84,14 +129,30 @@ def check_all():
 
 
 def self_test():
-    # k8s neuter: add an operator egress peer to an in-memory copy.
-    np = copy.deepcopy(load(K8S_NP))
-    np.setdefault("spec", {}).setdefault("egress", []).append(
-        {"to": [{"podSelector": {"matchLabels": {OPERATOR_INGRESS_LABEL[0]: OPERATOR_INGRESS_LABEL[1]}}}]}
-    )
-    if not k8s_permits_operator(np):
-        print("::error::self-test: k8s check did NOT detect a planted operator egress (gate is a no-op)", file=sys.stderr)
-        sys.exit(1)
+    key, val = OPERATOR_INGRESS_LABEL
+
+    # k8s neuter: plant an operator egress in EVERY selector form a real manifest
+    # could use. A two-sided red-probe MUST cover every form the gate claims to
+    # check, or it is green-by-omission for the form it does not itself plant
+    # (this is exactly the matchExpressions selector-island that slipped through
+    # an earlier matchLabels-only self-test). Each form is planted in isolation
+    # and must be independently detected.
+    k8s_neuters = {
+        "matchLabels": {"to": [{"podSelector": {"matchLabels": {key: val}}}]},
+        "matchExpressions In": {"to": [{"podSelector": {"matchExpressions": [
+            {"key": key, "operator": "In", "values": [val]}]}}]},
+        "matchExpressions Exists": {"to": [{"podSelector": {"matchExpressions": [
+            {"key": key, "operator": "Exists"}]}}]},
+        "namespaceSelector matchExpressions In": {"to": [{"namespaceSelector": {"matchExpressions": [
+            {"key": key, "operator": "In", "values": [val]}]}}]},
+    }
+    for form, egress_rule in k8s_neuters.items():
+        np = copy.deepcopy(load(K8S_NP))
+        np.setdefault("spec", {}).setdefault("egress", []).append(egress_rule)
+        if not k8s_permits_operator(np):
+            print(f"::error::self-test: k8s check did NOT detect a planted operator egress via {form} "
+                  f"(gate is a no-op / selector-island for this form)", file=sys.stderr)
+            sys.exit(1)
 
     # Compose neuter: join the operator network.
     cp = copy.deepcopy(load(COMPOSE))
