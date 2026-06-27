@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Minimal-shelf Compose topology for the MCP gateway (component-01) — the NETWORK
+# half of invariant #4 (NFR-SEC-52) expressed as Compose network membership: the
+# gateway is attached to the agent-facing and session networks ONLY, NEVER to the
+# operator network where the kill-switch/denylist/lifecycle ingress lives. There
+# is no co-location and no shared network granting gateway→operator reachability.
+#
+# The IaC-policy CI gate (scripts/iac-policy-check.sh) parses this file and FAILS
+# if the gateway service joins the operator network. Red-probe: add
+# `ocu-operator-net` to the gateway's networks and the gate goes RED.
+services:
+  ocu-mcp-gateway:
+    image: ghcr.io/wide-moat/ocu-mcp-gateway:latest
+    command:
+      - -listen=0.0.0.0:8080
+      - -boot-set=/etc/ocu/mcp-keys/boot-set.json
+      - -service-identity=ocu-mcp-gateway
+      - -control-url=https://ocu-control:8443
+      - -conn-ceiling=64
+    volumes:
+      # The Control-owned, root-owned hashed boot-set (salted SHA-256 only,
+      # never plaintext). Mounted read-only.
+      - type: bind
+        source: ./mcp-keys
+        target: /etc/ocu/mcp-keys
+        read_only: true
+    networks:
+      # Agent-facing: inbound MCP tool-calls (F1).
+      - ocu-agent-net
+      # Session: F5 forward to the Control SESSION API (not the operator ingress).
+      - ocu-session-net
+      # NOTE: ocu-operator-net is intentionally ABSENT. The gateway must never
+      # reach the operator ingress (NFR-SEC-52). The IaC gate asserts this.
+    depends_on:
+      - ocu-control
+    restart: unless-stopped
+
+  ocu-control:
+    image: ghcr.io/wide-moat/ocu-control:latest
+    networks:
+      # Control sits on the session network (its session API, reachable by the
+      # gateway) AND the operator network (its operator ingress, NOT reachable by
+      # the gateway because the gateway is not on ocu-operator-net).
+      - ocu-session-net
+      - ocu-operator-net
+    restart: unless-stopped
+
+networks:
+  # Agent-facing ingress network.
+  ocu-agent-net:
+    driver: bridge
+  # Session-request network (F5): gateway ↔ Control session API.
+  ocu-session-net:
+    driver: bridge
+    internal: true
+  # Operator network: the kill-switch/denylist/lifecycle ingress lives here. The
+  # gateway is NOT a member, so it has no L3 route to the operator ingress.
+  ocu-operator-net:
+    driver: bridge
+    internal: true

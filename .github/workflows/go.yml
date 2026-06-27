@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Mirrors the sibling ocu-control go.yml: SHA-pinned actions, go-version-file
+# reads go.mod so the toolchain is single-sourced. No Postgres — the gateway holds
+# no database (it holds no state that outlives a request).
+name: go
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt -l (fail on any unformatted file)
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: install staticcheck (pinned)
+        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+      - name: staticcheck
+        run: staticcheck ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        with:
+          version: v2.1.6
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: go test
+        run: go test ./... -count=1 -timeout 300s
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: go test -race
+        run: go test ./... -race -count=1 -timeout 600s
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # Coverage is measured over the production internal packages. cmd/ is the
+      # composition root (wiring exercised end-to-end, not unit-covered) and is
+      # excluded from the denominator, matching the sibling repo's convention.
+      - name: collect coverage (internal packages)
+        run: |
+          set -euo pipefail
+          pkgs=$(go list ./internal/...)
+          coverpkg=$(echo "$pkgs" | paste -sd, -)
+          go test -coverpkg="$coverpkg" -coverprofile=cover.out $pkgs -timeout 300s -count=1
+      - name: enforce the line-coverage floor (>= 80%, NFR/REQUIREMENTS)
+        run: |
+          set -euo pipefail
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
+          floor=80
+          awk -v t="${total:-0}" -v f="$floor" 'BEGIN {
+            if (t+0 < f+0) { printf "::error::go internal coverage %.1f%% below floor %.1f%%\n", t, f; exit 1 }
+            printf "go internal coverage %.1f%% >= floor %.1f%%\n", t, f
+          }'
+      - name: upload the coverage profile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: go-coverage-profile
+          path: cover.out
+
+  property-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # The schema-validator property tests (NFR-SEC-51, NFR-SEC-46): run them with
+      # extra rapid iterations so a regression in the validator surfaces.
+      - name: property tests (validator)
+        run: go test ./internal/profile/ -run 'Property|NeverPanics' -rapid.checks=10000 -count=1

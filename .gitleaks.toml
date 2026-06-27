@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+
+# gitleaks config for the ocu-mcp-gateway repository.
+#
+# It EXTENDS the default ruleset (extend.useDefault) and adds one custom rule for
+# the gateway's own caller-key format: a leaked "sk-ocu-..." caller key must fail
+# the secrets gate. The sk-ocu- prefix exists precisely to make a leaked key
+# scanner-detectable (ADR-0027 / REQUIREMENTS §Auth); this rule is the scanner
+# half of that promise.
+#
+# No real credentials are committed: keys are minted by the Control plane and
+# stored only as salted SHA-256 hashes; the gateway ships no example key.
+
+title = "ocu-mcp-gateway gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ocu-caller-key"
+description = "OCU MCP caller key (sk-ocu-) — a per-caller bearer; must never be committed in plaintext"
+# sk-ocu- followed by a base62 secret body (the key is 256-bit base62; match a
+# generous run of base62 chars after the prefix so a real key is caught while a
+# bare "sk-ocu-" mention in prose/tests is not).
+regex = '''sk-ocu-[A-Za-z0-9]{16,}'''
+keywords = ["sk-ocu-"]
+
+[[allowlists]]
+description = "Inert test/fixture caller keys — short, non-authenticating example values used in tests."
+# The unit tests use short, deliberately-inert sk-ocu- example values
+# (e.g. "sk-ocu-e2e-test-secret-key-001") that authenticate nothing — they hash
+# to a fixture record, not a real key. Scope the allowlist to the test files so
+# the detector still fires on a real key anywhere in non-test source.
+paths = [
+  '''.*_test\.go$''',
+]
+# Also allowlist the documented example values regardless of file, scoped tightly
+# to the exact inert strings so nothing real is allowlisted.
+regexes = [
+  '''sk-ocu-e2e-test-secret-key-001''',
+  '''sk-ocu-config-test-key''',
+]
