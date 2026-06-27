@@ -137,15 +137,32 @@ func assertModuleDepsExcludeOperatorPath(t *testing.T, root string) {
 	if err != nil {
 		t.Fatalf("`go list -deps ./...` failed: %v\n%s", err, out)
 	}
+	// The dep-prefix scan is deliberately scoped to OCU-owned import paths (this
+	// module plus the Wide-Moat org). The real threat is the gateway pulling in an
+	// OCU operator/lifecycle/kill-switch package — either its own or a cross-repo
+	// one from ocu-control — NOT a third-party dependency whose path happens to
+	// contain "/operator" (e.g. an "operator-sdk"), which would be a false
+	// positive. The unscoped SOURCE symbol scan (assertSymbols... above) already
+	// catches any code that NAMES an operator-route symbol regardless of origin;
+	// this dep-closure scan is the complementary "no OCU operator package in the
+	// transitive set" half, so the two together leave no gap.
+	ocuPrefixes := []string{gatewayModulePath, "github.com/Wide-Moat/"}
+	isOCU := func(dep string) bool {
+		for _, p := range ocuPrefixes {
+			if strings.HasPrefix(dep, p) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		dep := strings.TrimSpace(line)
+		if !isOCU(dep) {
+			continue
+		}
 		for _, frag := range forbiddenImportFragments {
-			// Only flag fragments under this module's own path or an obvious
-			// operator package — a third-party path coincidentally containing
-			// "/lifecycle" is not an operator-surface reach. Scope to the module
-			// path so the gate targets the gateway's own packages.
-			if strings.Contains(dep, frag) && strings.HasPrefix(dep, gatewayModulePath) {
-				t.Errorf("module dependency closure includes %q (operator-route fragment %q); "+
+			if strings.Contains(dep, frag) {
+				t.Errorf("module dependency closure includes OCU package %q (operator-route fragment %q); "+
 					"the gateway must reach no operator/lifecycle/kill-switch package (invariant #4)",
 					dep, frag)
 			}

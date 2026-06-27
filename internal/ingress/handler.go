@@ -31,9 +31,11 @@ const protocolVersionHeader = "MCP-Protocol-Version"
 //     revision before anything else.
 //  2. caller authentication (invariant #2) — resolve the principal from the
 //     transport bearer ONLY, never the body; fail-closed on any non-success.
-//  3. bounded decode (invariant #8) — MaxBytesReader caps the body pre-buffer.
-//  4. profile validation (invariant #1) — base-then-OCU-profile, pre-forward;
-//     an invalid message is denied and nothing downstream runs.
+//  3. bounded read (invariant #8) — MaxBytesReader caps the body at 512KiB so an
+//     oversized/slow body is refused at the transport before it is read whole;
+//     the profile size-ceiling (step 4) then runs on the bounded bytes.
+//  4. profile validation (invariant #1) — base-then-OCU-profile, before any
+//     forward; an invalid message is denied and nothing downstream runs.
 //  5. forward (F5) under the gateway service identity (invariant #3) — the
 //     caller credential never rides the forward.
 //  6. leak-free response (invariant #5) — only a stable reason class +
@@ -103,7 +105,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	// (3) Bounded decode — invariant #8. The body is capped pre-buffer and the
+	// (3) Bounded read — invariant #8. MaxBytesReader caps the body at 512KiB so
+	// an oversized/slow body is refused at the transport before it is read whole
+	// (the DoS guard); the body is then read into memory under that cap. The
 	// single-message envelope (no batching) is enforced before typed decode.
 	raw, derr := readBounded(w, r)
 	if derr != nil {

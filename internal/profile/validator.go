@@ -137,8 +137,11 @@ func (v *Validator) Validate(kind Kind, raw []byte) error {
 		return &Deny{Kind: KindInvalid, Reason: ReasonProfileSchema}
 	}
 
-	// Pre-buffer size ceilings, measured on the serialized bytes before any
-	// schema work, so an over-size payload is rejected without being staged.
+	// Per-kind size ceilings, measured on the serialized bytes before any schema
+	// work, so an over-size payload is rejected without being parsed or staged.
+	// These run on the already-bounded bytes the ingress read under its 512KiB
+	// MaxBytesReader cap (the transport-level DoS guard); this is the tighter
+	// per-kind ceiling (e.g. arguments ≤256KiB), not the transport cap.
 	if err := v.enforceSize(kind, raw); err != nil {
 		return err
 	}
@@ -172,10 +175,11 @@ func (v *Validator) Validate(kind Kind, raw []byte) error {
 }
 
 // enforceSize applies the per-kind serialized-byte ceiling from Limits. It is
-// the authoritative bound (the schema's maxLength keywords are code-point counts;
-// this byte measurement is the gateway's pre-buffer ceiling, NFR-SEC-46). A
-// zero or negative limit for a kind means "no byte ceiling configured for this
-// kind" and is skipped — the schema keyword still applies in pass 2.
+// the authoritative byte bound (the schema's maxLength keywords are code-point
+// counts; this byte measurement is the gateway's per-kind size ceiling,
+// NFR-SEC-46), applied before the schema passes so an over-size payload is not
+// parsed. A zero or negative limit for a kind means "no byte ceiling configured
+// for this kind" and is skipped — the schema keyword still applies in pass 2.
 func (v *Validator) enforceSize(kind Kind, raw []byte) error {
 	var ceiling int
 	switch kind {

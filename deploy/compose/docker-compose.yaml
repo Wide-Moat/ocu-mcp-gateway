@@ -7,7 +7,7 @@
 # operator network where the kill-switch/denylist/lifecycle ingress lives. There
 # is no co-location and no shared network granting gateway→operator reachability.
 #
-# The IaC-policy CI gate (scripts/iac-policy-check.sh) parses this file and FAILS
+# The IaC-policy CI gate (scripts/iac_policy_check.py) parses this file and FAILS
 # if the gateway service joins the operator network. Red-probe: add
 # `ocu-operator-net` to the gateway's networks and the gate goes RED.
 services:

@@ -26,13 +26,16 @@ same change.
 
 ---
 
-## I. Validate-then-forward; reject pre-buffer (NFR-SEC-51, NFR-SEC-46)
+## I. Validate-then-forward; bounded-read then validate (NFR-SEC-51, NFR-SEC-46)
 
 Every inbound tool-call is validated against the MCP base schema **then** the OCU
-profile before any forward; an unknown field or out-of-bound payload is rejected
-**pre-buffer** with a structured deny, never partially acted on. The two-pass
-order (base first, then overlay) and the pre-buffer size ceilings are the
-mechanism; batching is rejected (the body must be a single object).
+profile **before any forward**; an unknown field or out-of-bound payload is
+rejected with a structured deny, never partially acted on or forwarded. The
+transport DoS guard is a 512KiB `MaxBytesReader` cap that refuses an oversized or
+slow body before it is read whole; the per-kind profile size-ceilings then run on
+those bounded bytes, before the schema parse, so an over-size payload is rejected
+without being parsed. The two-pass order (base first, then overlay) is the
+validation mechanism; batching is rejected (the body must be a single object).
 
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant1_ValidateBeforeForward` — an invalid body is denied and the
@@ -164,6 +167,31 @@ rewrite.
   `TestStaticKeySetRejectsRevoked`, `TestStaticKeySetRejectsExpired`,
   `TestHashForRecordRejectsPrefixlessSecret`) and the boot-set loader
   `internal/config/loader_test.go`.
+
+---
+
+## Deferred (declared, not yet enforced)
+
+### Per-session tool-execution serialization (NFR-IC-05) — DEFERRED
+
+The component-01 spec (line 51) requires tool execution to be **serialized per
+session by default, with parallelism opt-in per skill** — a gateway behaviour
+(spec Open Question 4 names it "a gateway behaviour with no wire field"), so it is
+genuinely in this component's scope. It is **deferred, not covered**, and is
+declared here rather than dissolved into the renumbering above (no silent caps).
+
+Why deferred is correct today: the forward path is a fail-closed stub
+(`ControlForwarder` returns `ErrForwardFailed` — "Control transport not yet
+wired"), so **nothing executes to serialize**. A per-session serializer with no
+execution behind it would be untestable scaffolding. It lands with the
+Control-transport wiring and gets its own enforcing test then (a session-keyed
+serializer asserting sequential-by-default execution with opt-in parallelism,
+two-sided red-probed like the rest).
+
+The vendored wire contract already documents the constraint
+(`x-ocu-profile.concurrency`, `mode: sequential-default-per-session`,
+NFR-IC-05); this entry records that the *gateway-side enforcement* is the
+outstanding work.
 
 ---
 

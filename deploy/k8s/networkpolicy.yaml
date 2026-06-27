@@ -8,7 +8,7 @@
 # and the Audit pipeline (F10) — the operator ingress is NOT in the allowlist, so
 # a gateway→operator connection is dropped by the cluster, not merely unrouted.
 #
-# The IaC-policy CI gate (scripts/iac-policy-check.sh) renders this manifest and
+# The IaC-policy CI gate (scripts/iac_policy_check.py) renders this manifest and
 # FAILS if any egress rule would permit gateway→operator. Red-probe: add an
 # egress peer naming the operator ingress and the gate goes RED.
 apiVersion: networking.k8s.io/v1
