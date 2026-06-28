@@ -50,6 +50,7 @@ func TestServeServesAndShutsDown(t *testing.T) {
 		newValidator(t),
 		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}},
 		quota.NewCeiling(64),
+		NewOriginPolicy(nil),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -89,5 +90,18 @@ func TestServeServesAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve did not return after context cancel")
+	}
+}
+
+// CR fix: Serve with a nil handler is refused (would fall back to DefaultServeMux).
+func TestServeNilHandlerFailsClosed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	s := NewServer(ln, nil)
+	if err := s.Serve(context.Background()); err == nil {
+		t.Fatal("Serve with a nil handler must fail closed (no DefaultServeMux fallback)")
 	}
 }

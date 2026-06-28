@@ -27,17 +27,16 @@ regex = '''sk-ocu-[A-Za-z0-9]{16,}'''
 keywords = ["sk-ocu-"]
 
 [[allowlists]]
-description = "Inert test/fixture caller keys — short, non-authenticating example values used in tests."
-# The unit tests use short, deliberately-inert sk-ocu- example values
-# (e.g. "sk-ocu-e2e-test-secret-key-001") that authenticate nothing — they hash
-# to a fixture record, not a real key. Scope the allowlist to the test files so
-# the detector still fires on a real key anywhere in non-test source.
-paths = [
-  '''.*_test\.go$''',
-]
-# Also allowlist the documented example values regardless of file, scoped tightly
-# to the exact inert strings so nothing real is allowlisted.
+description = "Inert test/fixture caller keys — short, hyphenated, non-authenticating example values."
+# CR fix: do NOT allowlist whole `_test.go` files by path — that would silence a
+# REAL leaked key committed to a test. Instead allowlist ONLY the inert
+# example-value shape the tests use: `sk-ocu-` followed by short, hyphenated,
+# word-like tokens (e.g. "sk-ocu-wrong-secret", "sk-ocu-e2e-test-secret-key-001").
+# A REAL caller key is `sk-ocu-` + 32 bytes of UNHYPHENATED base62, which the
+# custom ocu-caller-key rule (sk-ocu-[A-Za-z0-9]{16,}) matches and this allowlist
+# does NOT — its regex requires a hyphen or stays under the run length, so a real
+# key in ANY file (test or not) still trips the gate.
 regexes = [
-  '''sk-ocu-e2e-test-secret-key-001''',
-  '''sk-ocu-config-test-key''',
+  '''sk-ocu-[a-z0-9]{1,15}(-[a-z0-9]+)*''',
 ]
+regexTarget = "match"

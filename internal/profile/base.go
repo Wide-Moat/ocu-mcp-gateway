@@ -40,12 +40,13 @@ func (jsonRPCBaseValidator) ValidateBase(kind Kind, raw []byte) error {
 		return errBaseMalformed
 	}
 
-	// Every JSON-RPC 2.0 message carries the version marker. A result/error and a
-	// request all have it; a bare MCP sub-object (a Tool, an InitializeResult)
-	// validated in isolation does not, so the marker is required only for the
-	// top-level request/result/error kinds.
-	switch kind {
-	case KindCallToolRequest, KindError:
+	// Only the top-level JSON-RPC REQUEST carries the "jsonrpc":"2.0" marker as a
+	// validated message here. A boundedError (KindError) is the standalone
+	// JSON-RPC error OBJECT (the `error` member's value: {code, message, data?}),
+	// validated in isolation like a Tool or an InitializeResult sub-object — it
+	// has no jsonrpc marker of its own (CR fix: requiring one rejected every valid
+	// bare error object). So the marker is required ONLY for KindCallToolRequest.
+	if kind == KindCallToolRequest {
 		if err := requireJSONRPCMarker(doc); err != nil {
 			return err
 		}
@@ -53,15 +54,33 @@ func (jsonRPCBaseValidator) ValidateBase(kind Kind, raw []byte) error {
 
 	switch kind {
 	case KindCallToolRequest:
-		// A tools/call request names a method and params.
+		// A tools/call request names a method and params, and its params are
+		// STRICT-VALIDATED (the contract requires CallToolRequest.params.arguments
+		// to be strict-validated input — x-ocu-limits.maxToolArgumentsBytes). There
+		// is no CallToolRequest overlay $def, so this strict check IS the request
+		// validation: params.name MUST be a non-empty string and, if present,
+		// params.arguments MUST be a JSON object. tools/call is the main attack
+		// surface, so a malformed request is rejected here, never forwarded.
 		if _, ok := doc["method"]; !ok {
 			return errBaseMalformed
 		}
-		if _, ok := doc["params"]; !ok {
+		paramsRaw, ok := doc["params"]
+		if !ok {
 			return errBaseMalformed
 		}
+		if err := validateCallToolParams(paramsRaw); err != nil {
+			return err
+		}
 	case KindError:
-		if _, ok := doc["error"]; !ok {
+		// boundedError IS the JSON-RPC error OBJECT ({code, message, data?}) — the
+		// value of a response's `error` member, validated standalone. Its required
+		// fields are code+message (per the contract's boundedError.required), NOT a
+		// nested `error` field (CR fix: checking doc["error"] rejected every valid
+		// error object, since the object has code/message, not error).
+		if _, ok := doc["code"]; !ok {
+			return errBaseMalformed
+		}
+		if _, ok := doc["message"]; !ok {
 			return errBaseMalformed
 		}
 	case KindCallToolResult:
@@ -78,6 +97,45 @@ func (jsonRPCBaseValidator) ValidateBase(kind Kind, raw []byte) error {
 		}
 	}
 	return nil
+}
+
+// validateCallToolParams strict-validates a tools/call request's params: name
+// MUST be a non-empty string (the tool to invoke), and arguments, if present,
+// MUST be a JSON object (never a scalar or array). This is the strict-validated
+// input the contract requires for CallToolRequest; tools/call has no overlay
+// $def, so this is where its request structure is enforced before any forward.
+func validateCallToolParams(paramsRaw json.RawMessage) error {
+	var params struct {
+		Name      *string         `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		// params is not an object (a scalar/array body) — malformed.
+		return errBaseMalformed
+	}
+	// name is required and must be a non-empty string.
+	if params.Name == nil || *params.Name == "" {
+		return errBaseMalformed
+	}
+	// arguments, when present, must be a JSON object — not a scalar or array. An
+	// absent arguments is permitted (a no-arg tool call).
+	if len(params.Arguments) > 0 {
+		trimmed := trimLeadingSpace(params.Arguments)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return errBaseMalformed
+		}
+	}
+	return nil
+}
+
+// trimLeadingSpace drops leading JSON whitespace so the first significant byte
+// can be inspected (an object opens with '{').
+func trimLeadingSpace(b []byte) []byte {
+	i := 0
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n') {
+		i++
+	}
+	return b[i:]
 }
 
 // requireJSONRPCMarker fails if the message lacks "jsonrpc":"2.0".

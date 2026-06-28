@@ -46,6 +46,11 @@ type keyRecordWire struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
+// bootSetFormatVersion is the only boot-set envelope version this build
+// understands. A file with a different version is refused (fail-closed) rather
+// than mis-parsed.
+const bootSetFormatVersion = 1
+
 // bootSetWire is the file envelope: a versioned list of records, so a future
 // format change is detectable rather than silently mis-parsed.
 type bootSetWire struct {
@@ -66,6 +71,24 @@ func (l *FileKeySetLoader) Load(_ context.Context) (auth.KeySet, error) {
 	var env bootSetWire
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("config: parse boot-set %q: %w", l.Path, err)
+	}
+	// Check the envelope version (CR fix): an unknown version is a format the
+	// gateway cannot interpret correctly — a future v2 boot-set parsed as v1 would
+	// silently mis-read fields. Fail-closed on an unsupported version rather than
+	// guessing. Version 1 is the only format this build understands.
+	if env.Version != bootSetFormatVersion {
+		return nil, fmt.Errorf("config: boot-set %q has unsupported version %d (this build understands version %d)", l.Path, env.Version, bootSetFormatVersion)
+	}
+	// Fail-fast on a zero-key boot-set (CR#2). A boot-set with no keys
+	// authenticates NOBODY — the gateway would bind a listener that silently
+	// rejects every request, and an operator would not learn the boot-set was
+	// empty by mistake (a config typo, a truncated push). That is an operational
+	// fail-open: the daemon looks up but admits nothing, with no signal. Refusing
+	// to load a zero-key set makes the misconfiguration loud at boot rather than
+	// silent at every request. (An intentionally-disabled deployment does not run
+	// the gateway at all; it does not ship an empty key file.)
+	if len(env.Keys) == 0 {
+		return nil, fmt.Errorf("config: boot-set %q contains zero keys; refusing to load (a key-less gateway authenticates nobody — fail-fast, not silent-reject)", l.Path)
 	}
 	records := make([]auth.KeyRecord, 0, len(env.Keys))
 	for i, k := range env.Keys {

@@ -44,7 +44,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 	}
 	h, err := NewHandler(
 		acceptAuth{caller: auth.Caller{KeyID: "k1", Tenant: "t1", Audience: "a1"}},
-		newValidator(t), fwd, ceiling,
+		newValidator(t), fwd, ceiling, NewOriginPolicy(nil),
 	)
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
@@ -198,7 +198,7 @@ func TestNewHandlerFailsClosedOnNilSeam(t *testing.T) {
 		{"nil ceiling", a, v, fwd, nil},
 	}
 	for _, tc := range cases {
-		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl); err == nil {
+		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl, NewOriginPolicy(nil)); err == nil {
 			t.Errorf("%s: NewHandler must fail closed, got nil error", tc.name)
 		}
 	}

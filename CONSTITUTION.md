@@ -37,12 +37,21 @@ those bounded bytes, before the schema parse, so an over-size payload is rejecte
 without being parsed. The two-pass order (base first, then overlay) is the
 validation mechanism; batching is rejected (the body must be a single object).
 
+A tools/call request — the main attack surface, which has no dedicated overlay
+$def — is STRICT-validated at the base pass: `params.name` MUST be a non-empty
+string and `params.arguments`, if present, MUST be a JSON object (never a scalar
+or array). A weakly-validated request is the gap CodeRabbit surfaced; strict
+validation closes it.
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant1_ValidateBeforeForward` — an invalid body is denied and the
-  recording forwarder is never called) and
+  recording forwarder is never called),
   `internal/profile/validator_smoke_test.go`
   (`TestOverSizeRejectedPreBuffer`, `TestBatchingRejected`,
-  `TestInitializeResultRejectsExtraCapability`).
+  `TestInitializeResultRejectsExtraCapability`), and the strict tools/call check
+  `internal/profile/coverage_test.go` (`TestBaseValidatorStructural` — a
+  tools/call with no params.name, an empty name, array arguments, or scalar params
+  all fail; neutering the strict check goes RED).
 
 ## II. Identity from the transport, never the body (NFR-SEC-09)
 
@@ -50,11 +59,20 @@ The caller credential is authenticated at ingress from transport-presented
 material **only** (the `Authorization` header); identity is never read from the
 JSON-RPC body or the URI query. Fail-closed: any non-success is a refusal.
 
+The request Origin is validated as a DNS-rebinding guard (x-ocu-authz: "Origin
+header MUST be validated"): a present Origin must be in the configured allowlist
+or the request is refused 403 before auth; an originless (CLI/non-browser) caller
+is allowed. With an empty allowlist any present Origin is refused (fail-closed for
+the browser case).
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
-  (`TestInvariant2_IdentityFromTransportNotBody`) and the architect pin
+  (`TestInvariant2_IdentityFromTransportNotBody`), the architect pin
   `internal/ingress/auth_header_only_test.go`
   (`TestAuthReadsTransportHeaderOnly` — the bearer-extraction path reads
-  `r.Header` and never `r.Body`; planting a body read goes RED).
+  `r.Header` and never `r.Body`; planting a body read goes RED), and the Origin
+  DNS-rebinding guard `internal/ingress/origin_test.go`
+  (`TestOriginPolicyAllows`, `TestHandlerRejectsDisallowedOrigin` — a disallowed
+  Origin is 403; neutering the Origin check goes RED).
 
 ## III. The caller credential never rides the F5 forward (NFR-SEC-09, NFR-SEC-26)
 
@@ -85,9 +103,15 @@ alone.
 - **Enforcement (network half):** `scripts/iac_policy_check.py` (structural YAML
   parse of `deploy/k8s/networkpolicy.yaml` and `deploy/compose/docker-compose.yaml`
   — deny-by-default; the operator ingress is absent from the k8s egress allowlist
-  and the gateway service does not join the Compose operator network). The
-  `--self-test` red-probe plants an operator route in each and asserts the gate
-  goes RED; it runs in CI before the main gate.
+  and the gateway service does not join the Compose operator network). The gate
+  is **fail-closed on an empty/malformed manifest**: a positive structural
+  assertion (`assert_k8s_wellformed`/`assert_compose_wellformed`) requires the
+  manifest to actually carry the gateway policy shape, so a manifest that proves
+  nothing fails CLOSED rather than passing by absence of an operator route (the
+  CodeRabbit fail-open). The `--self-test` red-probe plants an operator route in
+  every k8s selector form (matchLabels, matchExpressions In/Exists,
+  namespaceSelector) AND plants 6 empty/malformed manifests, asserting the gate
+  goes RED on each; it runs in CI before the main gate.
 
 ## V. Leak-free, size-bounded outbound (NFR-SEC-51)
 

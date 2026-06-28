@@ -80,39 +80,67 @@ func TestCeilingDoubleReleaseSafe(t *testing.T) {
 	}
 }
 
-// TestCeilingConcurrentAcquireRespectsLimit drives concurrent acquires and
-// asserts no more than `limit` ever hold a slot at once (the check-and-increment
-// is atomic under the lock).
+// TestCeilingConcurrentAcquireRespectsLimit drives concurrent acquires that HOLD
+// their slot until released, so the ceiling is genuinely under pressure (CR fix:
+// the earlier version acquired→incremented→decremented→released under one lock,
+// so slots freed instantly and maxObserved was ~1 — a vacuous test that passed
+// even with a broken ceiling). Here the goroutines block on a barrier while
+// holding, so EXACTLY `limit` acquire and the rest are refused; only after the
+// holders are counted does the test release them. This presses the ceiling for
+// real: defeating the limit lets more than `limit` acquire concurrently → RED.
 func TestCeilingConcurrentAcquireRespectsLimit(t *testing.T) {
 	const limit = 4
+	const racers = 50
 	c := NewCeiling(limit)
-	var wg sync.WaitGroup
+
 	var mu sync.Mutex
-	maxObserved := 0
-	current := 0
-	for i := 0; i < 50; i++ {
+	holders := 0                             // currently-holding goroutines
+	maxObserved := 0                         // peak concurrent holders
+	refused := 0                             // goroutines the ceiling refused
+	hold := make(chan struct{})              // closed to release all holders
+	attempted := make(chan struct{}, racers) // one per goroutine that finished its Acquire attempt
+
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			r, err := c.Acquire("hot")
+			attempted <- struct{}{} // signal the attempt resolved (admit OR refuse)
 			if err != nil {
-				return // refused — correct under saturation
+				mu.Lock()
+				refused++
+				mu.Unlock()
+				return
 			}
 			mu.Lock()
-			current++
-			if current > maxObserved {
-				maxObserved = current
+			holders++
+			if holders > maxObserved {
+				maxObserved = holders
 			}
 			mu.Unlock()
-			// hold briefly
+			<-hold // HOLD the slot until EVERY racer has attempted
 			mu.Lock()
-			current--
+			holders--
 			mu.Unlock()
 			r()
 		}()
 	}
+
+	// Wait until EVERY racer has resolved its Acquire (admitted holders are still
+	// holding, the rest are refused) BEFORE releasing the barrier. This guarantees
+	// the `limit` holders are concurrent and the refusals already happened, so a
+	// defeated ceiling (which would let >limit hold at once) is caught.
+	for i := 0; i < racers; i++ {
+		<-attempted
+	}
+	close(hold)
 	wg.Wait()
-	if maxObserved > limit {
-		t.Fatalf("observed %d concurrent holders, exceeds ceiling %d", maxObserved, limit)
+
+	if maxObserved != limit {
+		t.Fatalf("peak concurrent holders = %d, want exactly the ceiling %d", maxObserved, limit)
+	}
+	if refused != racers-limit {
+		t.Fatalf("expected %d refusals (racers - limit), got %d", racers-limit, refused)
 	}
 }

@@ -91,6 +91,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.ln == nil {
 		return errors.New("ingress: Serve called without a bound listener")
 	}
+	// A nil handler is a fail-closed error (CR fix): http.Server with a nil
+	// Handler silently falls back to http.DefaultServeMux, which could expose an
+	// unintended surface. The gateway must serve ONLY its own handler.
+	if s.handler == nil {
+		return errors.New("ingress: Serve called with a nil handler (would fall back to DefaultServeMux; fail-closed)")
+	}
 	srv := s.httpServer(ctx)
 	go func() {
 		<-ctx.Done()

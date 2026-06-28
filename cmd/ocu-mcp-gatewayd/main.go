@@ -53,13 +53,24 @@ func main() {
 // address, the boot-set path, the pinned-revision (fixed in code, not retunable),
 // the service-identity name, and the Control endpoint.
 type options struct {
-	version     bool
-	healthCheck bool
-	listenAddr  string
-	bootSetPath string
-	identity    string
-	controlURL  string
-	connCeiling int
+	version        bool
+	healthCheck    bool
+	listenAddr     string
+	bootSetPath    string
+	identity       string
+	controlURL     string
+	connCeiling    int
+	allowedOrigins originList
+}
+
+// originList is a repeatable string flag collecting allowed Origin values for the
+// DNS-rebinding guard (-allowed-origin https://app.example.com, repeatable).
+type originList []string
+
+func (o *originList) String() string { return fmt.Sprint([]string(*o)) }
+func (o *originList) Set(v string) error {
+	*o = append(*o, v)
+	return nil
 }
 
 func parseOptions(args []string) (options, error) {
@@ -73,6 +84,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.identity, "service-identity", "ocu-mcp-gateway", "gateway service identity name presented on F5")
 	fs.StringVar(&o.controlURL, "control-url", "", "Control/operator API base URL (F5 forward target)")
 	fs.IntVar(&o.connCeiling, "conn-ceiling", 64, "max concurrent in-flight requests per audience-validated caller (NFR-SEC-53)")
+	fs.Var(&o.allowedOrigins, "allowed-origin", "allowed browser Origin for the DNS-rebinding guard (repeatable); originless callers are always allowed")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -146,8 +158,13 @@ func serve(ctx context.Context, o options) error {
 	// is a conservative per-caller concurrency bound the operator may retune.
 	ceiling := quota.NewCeiling(o.connCeiling)
 
+	// Build the Origin policy (DNS-rebinding guard). An empty allowlist admits
+	// only originless (non-browser) callers — the safe default for the common MCP
+	// (CLI/SDK) caller; browser origins are opted in via -allowed-origin.
+	origin := ingress.NewOriginPolicy(o.allowedOrigins)
+
 	// Compose the ingress handler.
-	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling)
+	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling, origin)
 	if err != nil {
 		return fmt.Errorf("serve: build handler: %w", err)
 	}

@@ -61,14 +61,13 @@ func TestFileLoaderMalformedJSONFails(t *testing.T) {
 	}
 }
 
-func TestFileLoaderEmptyKeysAuthenticatesNothing(t *testing.T) {
+// CR#2: a zero-key boot-set fails the load (fail-fast), so the gateway never
+// binds a listener that authenticates nobody and silently rejects everything. A
+// load failure surfaces the misconfiguration at boot instead of at every request.
+func TestFileLoaderZeroKeysFailsFast(t *testing.T) {
 	loader := &FileKeySetLoader{Path: writeBootSet(t, `{"version":1,"keys":[]}`)}
-	ks, err := loader.Load(context.Background())
-	if err != nil {
-		t.Fatalf("an empty key list should load (distinct from a load failure): %v", err)
-	}
-	if _, err := ks.Resolve("sk-ocu-anything"); err == nil {
-		t.Fatal("an empty key set must authenticate nothing")
+	if _, err := loader.Load(context.Background()); err == nil {
+		t.Fatal("a zero-key boot-set must fail the load (fail-fast, not a silent empty set)")
 	}
 }
 
@@ -95,5 +94,17 @@ func TestFileLoaderInvalidExpiryFails(t *testing.T) {
 	loader := &FileKeySetLoader{Path: writeBootSet(t, content)}
 	if _, err := loader.Load(context.Background()); err == nil {
 		t.Fatal("an invalid expires_at must fail the load")
+	}
+}
+
+// CR fix: an unsupported boot-set version is refused (fail-closed) rather than
+// mis-parsed as v1.
+func TestFileLoaderUnsupportedVersionFails(t *testing.T) {
+	salt := hex.EncodeToString([]byte("s"))
+	hash, _ := auth.HashForRecord(salt, "sk-ocu-x")
+	content := `{"version":2,"keys":[{"key_id":"k","key_hash":"` + hash + `","salt":"` + salt + `","tenant":"t","audience":"a","status":"active"}]}`
+	loader := &FileKeySetLoader{Path: writeBootSet(t, content)}
+	if _, err := loader.Load(context.Background()); err == nil {
+		t.Fatal("an unsupported boot-set version must fail the load")
 	}
 }

@@ -64,9 +64,15 @@ jobs:
   sast-semgrep:
     runs-on: ubuntu-latest
     container:
-      image: semgrep/semgrep
+      # Pin the scanner image to a versioned tag, not the movable `semgrep/semgrep`
+      # (which floats to latest). A version tag makes the scan reproducible; a full
+      # digest pin (sha256:...) is the stronger form and is tracked to land once a
+      # verified pull is available in CI (see ISSUE: pin semgrep image by digest).
+      image: semgrep/semgrep:1.96.0
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: semgrep
         run: |
           semgrep ci --sarif --output=semgrep.sarif || true

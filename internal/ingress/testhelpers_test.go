@@ -71,7 +71,7 @@ func newValidator(t *testing.T) *profile.Validator {
 // boundary-order tests that only vary the auth outcome.
 func newTestHandler(t *testing.T, authn auth.CallerAuthenticator) *Handler {
 	t.Helper()
-	h, err := NewHandler(authn, newValidator(t), &recordingForwarder{err: forward.ErrForwardFailed}, quota.NewCeiling(64))
+	h, err := NewHandler(authn, newValidator(t), &recordingForwarder{err: forward.ErrForwardFailed}, quota.NewCeiling(64), NewOriginPolicy(nil))
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}

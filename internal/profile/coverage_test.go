@@ -114,25 +114,53 @@ func TestDenyErrorMessageLeakFree(t *testing.T) {
 func TestBaseValidatorStructural(t *testing.T) {
 	b := NewJSONRPCBaseValidator()
 
-	// A well-formed tools/call request passes.
-	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{}}`)); err != nil {
+	// A well-formed tools/call request (named tool, object arguments) passes.
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"echo","arguments":{}}}`)); err != nil {
 		t.Errorf("valid request: %v", err)
 	}
+	// A named tool with NO arguments (a no-arg call) passes.
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"echo"}}`)); err != nil {
+		t.Errorf("no-arg call: %v", err)
+	}
+	// STRICT (CR#1 fix): params with no name is rejected — tools/call is the main
+	// attack surface, the request structure is strict-validated.
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{}}`)); err == nil {
+		t.Error("a tools/call with no params.name must fail base pass (strict-validated input)")
+	}
+	// STRICT: params.name empty is rejected.
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":""}}`)); err == nil {
+		t.Error("a tools/call with an empty params.name must fail base pass")
+	}
+	// STRICT: params.arguments as an array (not an object) is rejected.
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x","arguments":[1,2]}}`)); err == nil {
+		t.Error("a tools/call whose arguments is an array must fail base pass")
+	}
+	// STRICT: params as a scalar (not an object) is rejected.
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","method":"tools/call","params":"oops"}`)); err == nil {
+		t.Error("a tools/call whose params is a scalar must fail base pass")
+	}
 	// Missing jsonrpc marker fails.
-	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"method":"tools/call","params":{}}`)); err == nil {
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"method":"tools/call","params":{"name":"x"}}`)); err == nil {
 		t.Error("missing jsonrpc marker must fail base pass")
 	}
 	// Missing method fails.
-	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","params":{}}`)); err == nil {
+	if err := b.ValidateBase(KindCallToolRequest, []byte(`{"jsonrpc":"2.0","params":{"name":"x"}}`)); err == nil {
 		t.Error("missing method must fail base pass")
 	}
 	// An array body fails (not a single object).
 	if err := b.ValidateBase(KindCallToolRequest, []byte(`[1,2,3]`)); err == nil {
 		t.Error("an array body must fail base pass")
 	}
-	// Error kind requires the error field.
-	if err := b.ValidateBase(KindError, []byte(`{"jsonrpc":"2.0"}`)); err == nil {
-		t.Error("an error message with no error field must fail base pass")
+	// Error kind is the standalone error OBJECT: required code+message, no jsonrpc
+	// marker (CR fix). A bare {code,message} passes; missing either fails.
+	if err := b.ValidateBase(KindError, []byte(`{"code":-32602,"message":"bad"}`)); err != nil {
+		t.Errorf("a valid error object must pass base pass: %v", err)
+	}
+	if err := b.ValidateBase(KindError, []byte(`{"message":"no code"}`)); err == nil {
+		t.Error("an error object with no code must fail base pass")
+	}
+	if err := b.ValidateBase(KindError, []byte(`{"code":-32602}`)); err == nil {
+		t.Error("an error object with no message must fail base pass")
 	}
 	// Tool kind requires name (no jsonrpc marker required for a bare sub-object).
 	if err := b.ValidateBase(KindTool, []byte(`{"inputSchema":{}}`)); err == nil {

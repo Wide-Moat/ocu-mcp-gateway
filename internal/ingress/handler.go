@@ -48,19 +48,21 @@ type Handler struct {
 	validator *profile.Validator
 	forwarder forward.Forwarder
 	ceiling   *quota.Ceiling
+	origin    OriginPolicy
 }
 
-// NewHandler wires the handler from its seams. The first three are required; a nil
+// NewHandler wires the handler from its seams. The first four are required; a nil
 // seam is a construction error, because a missing authenticator (admit-all),
-// validator (validate-nothing), or forwarder (no F5) would each silently defeat an
-// invariant. The ceiling is required too: a nil ceiling would remove the
-// per-caller fd fairness (invariant #8). Returning an error keeps the fail-closed
-// posture at construction.
-func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, forwarder forward.Forwarder, ceiling *quota.Ceiling) (*Handler, error) {
+// validator (validate-nothing), forwarder (no F5), or ceiling (no fd fairness,
+// invariant #8) would each silently defeat an invariant. The origin policy is a
+// value (its zero value admits only originless requests — the safe DNS-rebinding
+// default), so it is passed by value, not checked for nil. Returning an error
+// keeps the fail-closed posture at construction.
+func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, forwarder forward.Forwarder, ceiling *quota.Ceiling, origin OriginPolicy) (*Handler, error) {
 	if authn == nil || validator == nil || forwarder == nil || ceiling == nil {
 		return nil, errors.New("ingress: NewHandler requires non-nil authn, validator, forwarder, and ceiling (fail-closed)")
 	}
-	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling}, nil
+	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling, origin: origin}, nil
 }
 
 // ServeHTTP routes the MCP JSON-RPC POST surface. Only POST is accepted; the
@@ -78,11 +80,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// (1b) Origin validation — DNS-rebinding guard (x-ocu-authz: "Origin header
+	// MUST be validated"). A disallowed present Origin is refused before auth, so
+	// a browser tricked into hitting the gateway's local bind cannot proceed. A
+	// CLI/non-browser caller sends no Origin and is allowed.
+	origin := r.Header.Get("Origin")
+	if !h.origin.Allowed(origin) {
+		writeRPCError(w, http.StatusForbidden, rpcInvalidRequest, "origin not allowed")
+		return
+	}
+
 	// (2) Caller authentication — invariant #2. Identity comes from the transport
 	// bearer ONLY; the body is never consulted for identity. Fail-closed.
 	cred := auth.TransportCredential{
 		Bearer: bearerFromHeader(r),
-		Origin: r.Header.Get("Origin"),
+		Origin: origin,
 	}
 	caller, err := h.authn.Authenticate(r.Context(), cred)
 	if err != nil {

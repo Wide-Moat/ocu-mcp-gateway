@@ -120,10 +120,50 @@ def compose_gateway_joins_operator(doc):
     return OPERATOR_NETWORK in names
 
 
+def assert_k8s_wellformed(doc):
+    """Positive structural assertion (CR#3 fail-open fix): the gate must NOT pass
+    on an empty/None/structureless manifest. A manifest that does not even carry
+    the expected gateway NetworkPolicy shape is no proof of deny-by-default — it
+    fails CLOSED rather than passing by absence. Required: a NetworkPolicy kind, a
+    podSelector targeting the gateway, and an Egress policyType (the deny-by-default
+    egress posture this gate reasons about)."""
+    if not isinstance(doc, dict) or not doc:
+        fail("k8s manifest is empty or not a mapping; no proof of deny-by-default (fail-closed)")
+    if doc.get("kind") != "NetworkPolicy":
+        fail("k8s manifest is not a NetworkPolicy; the gateway egress posture is unproven (fail-closed)")
+    spec = doc.get("spec") or {}
+    sel_labels = ((spec.get("podSelector") or {}).get("matchLabels")) or {}
+    if sel_labels.get("app.kubernetes.io/name") != "ocu-mcp-gateway":
+        fail("k8s NetworkPolicy podSelector does not target the gateway; posture unproven (fail-closed)")
+    if "Egress" not in (spec.get("policyTypes") or []):
+        fail("k8s NetworkPolicy declares no Egress policyType; egress is not deny-by-default (fail-closed)")
+
+
+def assert_compose_wellformed(doc):
+    """Positive structural assertion (CR#3): the Compose manifest must carry the
+    gateway service with an explicit networks list, or there is no proof the
+    gateway is off the operator network — fail CLOSED rather than pass by absence."""
+    if not isinstance(doc, dict) or not doc:
+        fail("Compose manifest is empty or not a mapping; gateway network membership unproven (fail-closed)")
+    services = doc.get("services") or {}
+    gw = services.get(GATEWAY_SERVICE)
+    if not isinstance(gw, dict):
+        fail(f"Compose manifest has no {GATEWAY_SERVICE} service; network membership unproven (fail-closed)")
+    if not gw.get("networks"):
+        fail(f"Compose {GATEWAY_SERVICE} declares no networks; membership unproven (fail-closed)")
+
+
 def check_all():
-    if k8s_permits_operator(load(K8S_NP)):
+    k8s = load(K8S_NP)
+    compose = load(COMPOSE)
+    # Positive structural assertions FIRST (fail-closed on an empty/malformed
+    # manifest), so the gate cannot pass by absence of an operator route on a
+    # manifest that proves nothing.
+    assert_k8s_wellformed(k8s)
+    assert_compose_wellformed(compose)
+    if k8s_permits_operator(k8s):
         fail("k8s NetworkPolicy egress permits the operator ingress (gateway->operator route); NFR-SEC-52 violated")
-    if compose_gateway_joins_operator(load(COMPOSE)):
+    if compose_gateway_joins_operator(compose):
         fail(f"Compose gateway service joins {OPERATOR_NETWORK} (gateway->operator route); NFR-SEC-52 violated")
     print("iac-policy: gateway has no network route to the operator ingress on either shelf (NFR-SEC-52)")
 
@@ -167,7 +207,33 @@ def self_test():
         print("::error::self-test: Compose check did NOT detect a planted operator network (gate is a no-op)", file=sys.stderr)
         sys.exit(1)
 
-    # And the un-neutered manifests must PASS (the gate is not stuck-red either).
+    # CR#3 fail-open red-probe: an empty/None/structureless manifest must FAIL the
+    # positive structural assertion (fail-closed), not pass by absence. Each
+    # neuter must raise SystemExit (fail() exits non-zero).
+    empties = {
+        "k8s None": (assert_k8s_wellformed, None),
+        "k8s empty dict": (assert_k8s_wellformed, {}),
+        "k8s not-NetworkPolicy": (assert_k8s_wellformed, {"kind": "Pod"}),
+        "k8s no-Egress": (assert_k8s_wellformed,
+                          {"kind": "NetworkPolicy",
+                           "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "ocu-mcp-gateway"}},
+                                    "policyTypes": ["Ingress"]}}),
+        "compose None": (assert_compose_wellformed, None),
+        "compose no-gateway": (assert_compose_wellformed, {"services": {}}),
+    }
+    for name, (fn, doc) in empties.items():
+        try:
+            fn(doc)
+        except SystemExit:
+            continue  # correctly failed closed
+        print(f"::error::self-test: structural assertion did NOT fail closed on {name} "
+              f"(empty/malformed manifest would PASS the gate — fail-open)", file=sys.stderr)
+        sys.exit(1)
+
+    # And the un-neutered manifests must PASS (the gate is not stuck-red either),
+    # INCLUDING the positive structural assertions.
+    assert_k8s_wellformed(load(K8S_NP))
+    assert_compose_wellformed(load(COMPOSE))
     if k8s_permits_operator(load(K8S_NP)):
         print("::error::self-test: shipped k8s manifest unexpectedly flagged (false positive)", file=sys.stderr)
         sys.exit(1)
@@ -175,7 +241,7 @@ def self_test():
         print("::error::self-test: shipped Compose manifest unexpectedly flagged (false positive)", file=sys.stderr)
         sys.exit(1)
 
-    print("iac-policy self-test: both checks RED-when-neutered and GREEN-as-shipped")
+    print("iac-policy self-test: selector forms + empty-manifest fail-open all RED-when-neutered, GREEN-as-shipped")
 
 
 if __name__ == "__main__":
