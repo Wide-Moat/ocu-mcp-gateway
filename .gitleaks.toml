@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+
+# gitleaks config for the ocu-mcp-gateway repository.
+#
+# It EXTENDS the default ruleset (extend.useDefault) and adds one custom rule for
+# the gateway's own caller-key format: a leaked "sk-ocu-..." caller key must fail
+# the secrets gate. The sk-ocu- prefix exists precisely to make a leaked key
+# scanner-detectable (ADR-0027 / REQUIREMENTS §Auth); this rule is the scanner
+# half of that promise.
+#
+# No real credentials are committed: keys are minted by the Control plane and
+# stored only as salted SHA-256 hashes; the gateway ships no example key.
+
+title = "ocu-mcp-gateway gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ocu-caller-key"
+description = "OCU MCP caller key (sk-ocu-) — a per-caller bearer; must never be committed in plaintext"
+# sk-ocu- followed by a base62 secret body (the key is 256-bit base62; match a
+# generous run of base62 chars after the prefix so a real key is caught while a
+# bare "sk-ocu-" mention in prose/tests is not).
+regex = '''sk-ocu-[A-Za-z0-9]{16,}'''
+keywords = ["sk-ocu-"]
+
+[[allowlists]]
+description = "Inert test/fixture caller keys — short, lowercase, non-authenticating example values."
+# Do NOT allowlist whole `_test.go` files by path — that would silence a REAL
+# leaked key committed to a test. Allowlist ONLY the inert example-value shape the
+# tests use, and pin it so NO real key can match regardless of its character mix:
+#
+#   - ANCHORED with ^...$ — the WHOLE token must match, not a substring. An
+#     unanchored regex matched the leading lowercase run of an all-lowercase real
+#     key and silenced it; anchoring closes that (architect-found gap).
+#   - TOTAL BODY LENGTH capped at 24 — every inert test value has a body ≤15
+#     chars; a REAL caller key is 32 bytes of base62 (a ~43-char body), far above
+#     the cap. So no real key of ANY case mix (uppercase, lowercase, hyphenated or
+#     not) can be allowlisted by length alone — the gate does not depend on a
+#     probabilistic property (that base62 happens to contain uppercase).
+#
+# The allowlist regex is compared against the DETECTING rule's full match string
+# (which, for the generic-api-key default rule, includes the `secret := "..."`
+# assignment context), so it CANNOT be ^...$-anchored to the bare key. Instead it
+# matches the inert token as a substring bounded on BOTH sides:
+#   - left: `sk-ocu-`
+#   - body: 1..24 chars of [a-z0-9-]
+#   - right: a trailing \b WORD BOUNDARY (end of the token — a quote, EOL, etc).
+# A REAL all-lowercase key (43-char body) does NOT match: `{1,24}` consumes at
+# most 24 of its chars and the 25th is still [a-z0-9], so there is NO word
+# boundary at offset 24 — the alternation fails and the long key is NOT
+# allowlisted. So no real key of any case mix is silenced by length alone; the
+# gate does not depend on the key happening to contain uppercase. (Verified
+# firsthand: an all-lowercase 34/43-char key in a _test.go still trips the gate.)
+regexes = [
+  '''\bsk-ocu-[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?\b''',
+]

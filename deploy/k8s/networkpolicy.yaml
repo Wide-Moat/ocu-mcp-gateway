@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# NetworkPolicy for the MCP gateway (component-01) — the NETWORK half of
+# invariant #4 (NFR-SEC-52): the gateway has ZERO network route to the operator
+# ingress (kill-switch / denylist / lifecycle). This is deny-by-default egress
+# with an explicit allowlist that names ONLY the Control session-request API (F5)
+# and the Audit pipeline (F10) — the operator ingress is NOT in the allowlist, so
+# a gateway→operator connection is dropped by the cluster, not merely unrouted.
+#
+# The IaC-policy CI gate (scripts/iac_policy_check.py) renders this manifest and
+# FAILS if any egress rule would permit gateway→operator. Red-probe: add an
+# egress peer naming the operator ingress and the gate goes RED.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ocu-mcp-gateway
+  labels:
+    app.kubernetes.io/name: ocu-mcp-gateway
+    app.kubernetes.io/component: mcp-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ocu-mcp-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Inbound MCP tool-calls (F1) from agent/MCP clients reach the gateway's MCP
+    # listener port only. The caller is authenticated at the application layer;
+    # this rule bounds the L3 surface.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              ocu.dev/zone: agent-facing
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # F5 — session-request forward to the Control session API ONLY. This names the
+    # Control plane's SESSION ingress, NOT its operator ingress. The operator
+    # ingress (kill-switch/denylist/lifecycle) is a DISTINCT endpoint and is
+    # deliberately absent from this allowlist.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ocu-control
+              ocu.dev/ingress: session
+      ports:
+        - protocol: TCP
+          port: 8443
+    # F10 — OCSF audit fan-in to the Audit pipeline.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ocu-audit
+      ports:
+        - protocol: TCP
+          port: 9443
+    # DNS resolution (kube-dns) — required for the above to resolve, scoped to
+    # the cluster DNS service.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+  # NOTE: there is intentionally NO egress rule selecting
+  # `ocu.dev/ingress: operator`. The gateway must never reach the operator
+  # ingress on either shelf (NFR-SEC-52). The IaC-policy gate asserts this
+  # absence; adding such a rule fails CI.
