@@ -8,6 +8,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"testing"
+
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
 )
 
 // staticCred is a test ServiceCredential presenting a fixed token/principal.
@@ -32,11 +34,26 @@ func goodTLS() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12}
 }
 
+// validProvisioning is an admissible deployment ProvisioningPolicy for tests: a
+// real (non-Unspecified) workload trust profile, a single-scope mount, a
+// deny-default egress, and a set pids cap. It models the deployment config the
+// gateway is constructed with, so a test can reach the create-build path.
+func validProvisioning() ProvisioningPolicy {
+	pids := int64(512)
+	return ProvisioningPolicy{
+		WorkloadTrustProfile: WorkloadTrustProfileInternalWorkforce,
+		MountIntent:          MountIntent{Destination: "/workspace", FilesystemID: "fs-1", ReadOnly: false, CacheDurationS: 30},
+		EgressPolicy:         EgressPolicy{DefaultDeny: true, AllowedUpstream: "object-store", FilesystemID: "fs-1"},
+		ResourceCaps:         ResourceCaps{CPUCores: 1.0, MemoryBytes: 512 << 20, PIDsLimit: &pids},
+	}
+}
+
 func TestNewWithDialRequiresServiceCredential(t *testing.T) {
 	_, err := NewControlForwarderWithDial(
 		ServiceIdentity{Name: "gw"},
 		DialConfig{Endpoint: "https://control:8443", TLS: goodTLS()},
 		nil,
+		validProvisioning(),
 	)
 	if err == nil {
 		t.Fatal("a nil ServiceCredential must fail closed (NFR-SEC-26)")
@@ -48,6 +65,7 @@ func TestNewWithDialRequiresMTLSWhenEndpointSet(t *testing.T) {
 		ServiceIdentity{Name: "gw"},
 		DialConfig{Endpoint: "https://control:8443", TLS: nil}, // no mTLS
 		staticCred{token: "t", principal: "gw"},
+		validProvisioning(),
 	)
 	if !errors.Is(err, ErrForwardFailed) {
 		t.Fatalf("a configured endpoint without mTLS must fail (NFR-SEC-37), got %v", err)
@@ -59,6 +77,7 @@ func TestNewWithDialRequiresIdentity(t *testing.T) {
 		ServiceIdentity{Name: ""},
 		DialConfig{TLS: goodTLS()},
 		staticCred{token: "t", principal: "gw"},
+		validProvisioning(),
 	)
 	if err == nil {
 		t.Fatal("an empty service identity must fail closed")
@@ -77,6 +96,7 @@ func TestDialForwardFailsClosedOnCredError(t *testing.T) {
 		ServiceIdentity{Name: "gw"},
 		DialConfig{Endpoint: "https://control:8443", TLS: goodTLS()},
 		staticCred{err: errors.New("token source down"), principal: "gw"},
+		validProvisioning(),
 	)
 	if err != nil {
 		t.Fatalf("construct: %v", err)
@@ -99,16 +119,17 @@ func TestDialForwardPendingFrozenSchema(t *testing.T) {
 		ServiceIdentity{Name: "gw"},
 		DialConfig{Endpoint: "https://control:8443", TLS: goodTLS()},
 		staticCred{token: "tok", principal: "gw-principal"},
+		validProvisioning(),
 	)
 	if err != nil {
 		t.Fatalf("construct: %v", err)
 	}
-	_, ferr := f.Forward(context.Background(), SessionRequest{})
-	// The credential is good, the mTLS is valid — so the ONLY remaining gate is
-	// the pending #293 wire fields. It must fail closed there, not pretend success
-	// and not invent a body.
+	_, ferr := f.Forward(context.Background(), SessionRequest{Principal: auth.Caller{Tenant: "tenant-a"}})
+	// The credential is good, the mTLS is valid, and the create builds+validates —
+	// so the ONLY remaining gate is the gRPC round-trip. It must fail closed there,
+	// not pretend success.
 	if !errors.Is(ferr, ErrForwardFailed) {
-		t.Fatalf("the dial path must fail closed pending #293, got %v", ferr)
+		t.Fatalf("the dial path must fail closed pending the gRPC round-trip, got %v", ferr)
 	}
 }
 
@@ -117,6 +138,7 @@ func TestDialForwardNoEndpointFailsClosed(t *testing.T) {
 		ServiceIdentity{Name: "gw"},
 		DialConfig{Endpoint: "", TLS: goodTLS()}, // no endpoint
 		staticCred{token: "t", principal: "gw"},
+		validProvisioning(),
 	)
 	if err != nil {
 		t.Fatalf("construct: %v", err)
