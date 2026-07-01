@@ -81,14 +81,31 @@ on any path reaching the sandbox; the forward carries only the gateway's own
 service identity. This is a **type fact**: the forward shapes have no field that
 could carry the credential.
 
-The transport (P1 dial skeleton) presents the gateway's OWN service credential —
-the host-side service-to-service "Generic internal token" (component-01:39, §8) —
-over an mTLS-1.3 leg (NFR-SEC-37), never the caller's credential and never an
-operator scope (P1-S2). A forward with no service credential is refused, never
-sent anonymously (NFR-SEC-26). The session-request WIRE FIELDS are NOT invented in
-this repo: they come from the frozen Control session-setup schema (PR #293) and
-plug into the seam when vendored — so the dial path fails closed pending #293
-rather than fabricating a cross-component body.
+The transport (P1 dial) presents the gateway's OWN service credential — the
+host-side service-to-service "Generic internal token" (component-01:39, §8) — over
+an mTLS-1.3 leg (NFR-SEC-37), never the caller's credential and never an operator
+scope (P1-S2). A forward with no service credential is refused, never sent
+anonymously (NFR-SEC-26). The session-request WIRE FIELDS are NOT invented in this
+repo: they are the frozen Control session-setup schema (`session_setup.proto`, PR
+#293), vendored byte-identical (see `VENDORED.md`) and hand-mapped into the seam
+(`internal/forward/session.go`).
+
+The F5 create is **stateless create-per-forward** (architect ruling A). The
+session-provisioning fields (`workload_trust_profile`, `mount_intent`,
+`egress_policy`, `resource_caps`) come STRICTLY from the deployment
+`ProvisioningPolicy` injected at construction — NEVER from the caller's tool-call
+body, so **a caller cannot provision its own session** (widen caps, escalate the
+trust profile, or open egress). The only caller-influenced value is the
+`session_hint`, and it is a HINT (NFR-SEC-43), sourced from the resolved,
+non-secret principal handle. Custody holds as a type fact on both directions: the
+mapped shapes have no field for the minted Storage-JWT / filestore credential
+(`MountIntent` omits the auth token). The `image` ref is PIN-PENDING at the
+gatekeeper (`reserved 6`/`"image"`, #205 / issue #3) and is left UNSET, never
+invented nor silently dropped. The gRPC marshal + round-trip is the remaining
+wire-up, so the dial path fails closed AFTER building and validating an admissible
+create (fail-closed on an unspecified profile, an ill-formed mount scope, or an
+unset pids cap). `Route`/`Destroy` are fail-closed seam stubs on P1 (the gateway
+holds no session state); session affinity returns with P3.
 
 - **Enforcement:** `internal/forward/no_credential_test.go`
   (`TestForwardShapesCarryNoCredential` — a reflect pass over every forward shape
@@ -101,7 +118,14 @@ rather than fabricating a cross-component body.
   mTLS fails NFR-SEC-37; `TestNewWithDialRequiresServiceCredential` — a nil
   service credential fails NFR-SEC-26; `TestDialForwardFailsClosedOnCredError` —
   a credential error refuses the forward; `TestDialForwardPendingFrozenSchema` —
-  the dial path fails closed pending #293, never inventing the body).
+  the dial path builds+validates the create then fails closed pending the gRPC
+  round-trip). The P1-live provisioning guard: `internal/forward/session_test.go`
+  (`TestProvisioningComesFromPolicyNotBody` — provisioning comes from the
+  deployment policy, not the caller body, so a caller cannot provision;
+  `TestCreateRefusesUnspecifiedProfile` / `TestConstructorRefusesInadmissiblePolicy`
+  — fail-closed admission; `TestCreateCarriesNoCredentialField` — the mapped
+  create carries no credential-named field; `TestRouteDestroyAreFailClosedStubs` —
+  the P1 Route/Destroy stubs refuse rather than fabricate).
 
 ## IV. No gateway route to the operator surface — code AND network (NFR-SEC-52)
 
