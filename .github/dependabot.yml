@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Dependency-update policy for component-01 (ocu-mcp-gateway). Two ecosystems
+# live in this repo: the Go module (root go.mod) and the GitHub Actions used by
+# the go.yml / security.yml workflows. Both are watched.
+#
+# `cooldown` (default-days: 7) deliberately delays *version* update PRs for a
+# week after a release lands upstream. This is a supply-chain guard, not lint
+# noise reduction: a freshly-published version that is yanked, compromised, or
+# hot-fixed within its first days never reaches an auto-opened PR here. It does
+# NOT gate security advisories — Dependabot still raises a security-update PR
+# immediately when a known-vulnerable version is in use, regardless of cooldown.
+#
+# Actions are SHA-pinned in the workflows (see security.yml). Dependabot bumps a
+# pinned SHA to the new release's SHA (keeping the pin), so the 40-char-pin
+# invariant survives an update — the PR changes the SHA, not the pinning style.
+version: 2
+
+updates:
+  # Go module — root go.mod.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      # One PR per week for the non-major bumps keeps review surface small; a
+      # major bump still opens on its own so the breaking change is not buried.
+      go-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "go"
+
+  # GitHub Actions used by the CI workflows (go.yml, security.yml).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "github-actions"
