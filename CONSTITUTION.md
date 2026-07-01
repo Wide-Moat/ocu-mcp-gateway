@@ -253,28 +253,35 @@ the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
 
 ---
 
-## Deferred (declared, not yet enforced)
+## XII. Tool execution is serialized per session by default (NFR-IC-05)
 
-### Per-session tool-execution serialization (NFR-IC-05) — DEFERRED
+The tool-calls of one logical session run in arrival order — one settled before
+the next starts — and parallelism is an explicit per-skill opt-in decided by a
+deployment predicate, NEVER by a caller body field. The serializer keys on the
+session hint (a HINT, NFR-SEC-43), sits BEHIND the per-caller ceiling (total
+in-flight is bounded first), and holds the session's slot across forward + emit
+(the settled state), so call N+1 of a session cannot overtake the durable record
+of call N — the per-session history is strictly executed → recorded → next.
 
-The component-01 spec (line 51) requires tool execution to be **serialized per
-session by default, with parallelism opt-in per skill** — a gateway behaviour
-(spec Open Question 4 names it "a gateway behaviour with no wire field"), so it is
-genuinely in this component's scope. It is **deferred, not covered**, and is
-declared here rather than dissolved into the renumbering above (no silent caps).
+It is an ephemeral, self-cleaning concurrency primitive, NOT a session registry:
+a session's gate exists only while it is contended and is deleted at zero
+in-flight, so nothing outlives the union of overlapping in-flight requests (the
+component-01 no-state-outlives-a-request invariant holds; architect ruling P3-A).
+The per-session queue is BOUNDED — the key is caller-influenced, so an unbounded
+queue would be a DoS vector; overflow is a fail-closed refusal with a stable
+reason, never an unbounded park.
 
-Why deferred is correct today: the forward path is a fail-closed stub
-(`ControlForwarder` returns `ErrForwardFailed` — "Control transport not yet
-wired"), so **nothing executes to serialize**. A per-session serializer with no
-execution behind it would be untestable scaffolding. It lands with the
-Control-transport wiring and gets its own enforcing test then (a session-keyed
-serializer asserting sequential-by-default execution with opt-in parallelism,
-two-sided red-probed like the rest).
-
-The vendored wire contract already documents the constraint
-(`x-ocu-profile.concurrency`, `mode: sequential-default-per-session`,
-NFR-IC-05); this entry records that the *gateway-side enforcement* is the
-outstanding work.
+- **Enforcement:** `internal/serialize/serialize_test.go`
+  (`TestFIFOOrderPerSession` — queued calls of a session proceed in arrival order;
+  `TestSelfCleaningDrainsToZero` — the gate map returns to zero after drain,
+  neutering the delete-at-zero goes RED; `TestBoundedRefusesOverflow` — a session
+  queue at its bound refuses with `ErrSerializerFull` rather than parking,
+  neutering the bound goes RED; `TestParallelOptInBypassesSerialization` — a
+  parallel-opted tool does not serialize while a sequential one does;
+  `TestDifferentSessionsDoNotBlockEachOther` — serialization is per session). The
+  handler wiring (slot spans forward + emit): `internal/ingress/handler.go` step
+  4b. The parallel opt-in is a deployment predicate (`ParallelPredicate`), never a
+  caller body field.
 
 ---
 

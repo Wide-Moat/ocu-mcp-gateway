@@ -17,6 +17,7 @@ import (
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/quota"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/serialize"
 )
 
 const validToolCall = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}`
@@ -45,7 +46,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 	}
 	h, err := NewHandler(
 		acceptAuth{caller: auth.Caller{KeyID: "k1", Tenant: "t1", Audience: "a1"}},
-		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), newEmitter(t),
+		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), newEmitter(t), newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
@@ -191,7 +192,7 @@ func TestF10_AuditWriteFailureIsRefusal(t *testing.T) {
 		acceptAuth{caller: auth.Caller{KeyID: "k1"}},
 		newValidator(t),
 		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}}, // forward SUCCEEDS
-		quota.NewCeiling(64), NewOriginPolicy(nil), em,
+		quota.NewCeiling(64), NewOriginPolicy(nil), em, newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -212,7 +213,7 @@ func TestF10_AuditActorIsHostAttested(t *testing.T) {
 		acceptAuth{caller: auth.Caller{KeyID: "resolved-key-9"}},
 		newValidator(t),
 		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}},
-		quota.NewCeiling(64), NewOriginPolicy(nil), em,
+		quota.NewCeiling(64), NewOriginPolicy(nil), em, newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -242,6 +243,7 @@ func TestNewHandlerFailsClosedOnNilSeam(t *testing.T) {
 	c := quota.NewCeiling(1)
 	a := acceptAuth{}
 	em := newEmitter(t)
+	sz := newSerializer(t)
 	cases := []struct {
 		name  string
 		authn auth.CallerAuthenticator
@@ -249,15 +251,17 @@ func TestNewHandlerFailsClosedOnNilSeam(t *testing.T) {
 		f     forward.Forwarder
 		cl    *quota.Ceiling
 		em    *audit.Emitter
+		sz    *serialize.Serializer
 	}{
-		{"nil authn", nil, v, fwd, c, em},
-		{"nil validator", a, nil, fwd, c, em},
-		{"nil forwarder", a, v, nil, c, em},
-		{"nil ceiling", a, v, fwd, nil, em},
-		{"nil emitter", a, v, fwd, c, nil},
+		{"nil authn", nil, v, fwd, c, em, sz},
+		{"nil validator", a, nil, fwd, c, em, sz},
+		{"nil forwarder", a, v, nil, c, em, sz},
+		{"nil ceiling", a, v, fwd, nil, em, sz},
+		{"nil emitter", a, v, fwd, c, nil, sz},
+		{"nil serializer", a, v, fwd, c, em, nil},
 	}
 	for _, tc := range cases {
-		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl, NewOriginPolicy(nil), tc.em); err == nil {
+		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl, NewOriginPolicy(nil), tc.em, tc.sz); err == nil {
 			t.Errorf("%s: NewHandler must fail closed, got nil error", tc.name)
 		}
 	}

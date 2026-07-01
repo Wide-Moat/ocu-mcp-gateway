@@ -52,6 +52,7 @@ func TestServeServesAndShutsDown(t *testing.T) {
 		quota.NewCeiling(64),
 		NewOriginPolicy(nil),
 		newEmitter(t),
+		newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
