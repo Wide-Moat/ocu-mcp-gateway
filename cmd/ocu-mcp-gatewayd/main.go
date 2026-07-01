@@ -40,6 +40,7 @@ import (
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/ingress"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/quota"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/serialize"
 )
 
 func main() {
@@ -63,6 +64,7 @@ type options struct {
 	connCeiling    int
 	allowedOrigins originList
 	auditBus       string
+	serializeDepth int
 }
 
 // originList is a repeatable string flag collecting allowed Origin values for the
@@ -88,6 +90,7 @@ func parseOptions(args []string) (options, error) {
 	fs.IntVar(&o.connCeiling, "conn-ceiling", 64, "max concurrent in-flight requests per audience-validated caller (NFR-SEC-53)")
 	fs.Var(&o.allowedOrigins, "allowed-origin", "allowed browser Origin for the DNS-rebinding guard (repeatable); originless callers are always allowed")
 	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in); empty fails closed on emit")
+	fs.IntVar(&o.serializeDepth, "serialize-max-depth", 64, "max queued tool-calls per session before refusal (NFR-IC-05 per-session serializer; DoS guard on the session key)")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -174,8 +177,15 @@ func serve(ctx context.Context, o options) error {
 		return fmt.Errorf("serve: build audit emitter: %w", err)
 	}
 
+	// Build the per-session tool-call serializer (NFR-IC-05): sequential per
+	// session by default, bounded per-session queue (overflow refused, a DoS guard
+	// on the caller-supplied session key). The parallel opt-in predicate is nil
+	// here — v1 has no skill registry, so every tool serializes; a deployment that
+	// grows a parallel-safe tool allow-list injects the predicate here.
+	serializer := serialize.NewSerializer(o.serializeDepth, nil)
+
 	// Compose the ingress handler.
-	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling, origin, emitter)
+	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling, origin, emitter, serializer)
 	if err != nil {
 		return fmt.Errorf("serve: build handler: %w", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/quota"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/serialize"
 )
 
 // body wraps a JSON string as an io.Reader for an HTTP POST.
@@ -54,6 +55,14 @@ func newEmitter(t *testing.T) *audit.Emitter {
 		t.Fatalf("build emitter: %v", err)
 	}
 	return em
+}
+
+// newSerializer builds a per-session serializer for handler wiring: a generous
+// per-session bound and the default (nil) parallel predicate, so every tool
+// serializes and the bound is not hit in a single-request boundary test.
+func newSerializer(t *testing.T) *serialize.Serializer {
+	t.Helper()
+	return serialize.NewSerializer(64, nil)
 }
 
 // rejectAllAuth is a test authenticator that refuses every credential. It models
@@ -109,7 +118,7 @@ func newValidator(t *testing.T) *profile.Validator {
 // boundary-order tests that only vary the auth outcome.
 func newTestHandler(t *testing.T, authn auth.CallerAuthenticator) *Handler {
 	t.Helper()
-	h, err := NewHandler(authn, newValidator(t), &recordingForwarder{err: forward.ErrForwardFailed}, quota.NewCeiling(64), NewOriginPolicy(nil), newEmitter(t))
+	h, err := NewHandler(authn, newValidator(t), &recordingForwarder{err: forward.ErrForwardFailed}, quota.NewCeiling(64), NewOriginPolicy(nil), newEmitter(t), newSerializer(t))
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}

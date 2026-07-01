@@ -24,6 +24,7 @@ func handlerWithOrigin(t *testing.T, allowed []string) *Handler {
 		quota.NewCeiling(64),
 		NewOriginPolicy(allowed),
 		newEmitter(t),
+		newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)

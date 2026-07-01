@@ -16,6 +16,7 @@ import (
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/quota"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/serialize"
 )
 
 // pinnedProtocolVersion is the single MCP revision this gateway negotiates. A
@@ -39,6 +40,8 @@ const protocolVersionHeader = "MCP-Protocol-Version"
 //     the profile size-ceiling (step 4) then runs on the bounded bytes.
 //  4. profile validation (invariant #1) — base-then-OCU-profile, before any
 //     forward; an invalid message is denied and nothing downstream runs.
+//     4b. per-session tool-call serialization (NFR-IC-05) — sequential per session
+//     by default, per-skill parallel opt-in; the slot spans forward + emit.
 //  5. forward (F5) under the gateway service identity (invariant #3) — the
 //     caller credential never rides the forward.
 //  6. F10 OCSF audit emit (NFR-SEC-03) — emit-before-ack, fail-closed
@@ -49,28 +52,30 @@ const protocolVersionHeader = "MCP-Protocol-Version"
 // Every boundary fails closed (invariant #9): a non-success at any step refuses
 // the request and forwards nothing.
 type Handler struct {
-	authn     auth.CallerAuthenticator
-	validator *profile.Validator
-	forwarder forward.Forwarder
-	ceiling   *quota.Ceiling
-	origin    OriginPolicy
-	emitter   *audit.Emitter
+	authn      auth.CallerAuthenticator
+	validator  *profile.Validator
+	forwarder  forward.Forwarder
+	ceiling    *quota.Ceiling
+	origin     OriginPolicy
+	emitter    *audit.Emitter
+	serializer *serialize.Serializer
 }
 
 // NewHandler wires the handler from its seams. The authenticator, validator,
-// forwarder, ceiling, and emitter are all required; a nil seam is a construction
-// error, because a missing authenticator (admit-all), validator
+// forwarder, ceiling, emitter, and serializer are all required; a nil seam is a
+// construction error, because a missing authenticator (admit-all), validator
 // (validate-nothing), forwarder (no F5), ceiling (no fd fairness, invariant #8),
-// or emitter (no F10 audit, so a forward could ack without a durable record —
-// NFR-SEC-03) would each silently defeat an invariant. The origin policy is a
-// value (its zero value admits only originless requests — the safe DNS-rebinding
-// default), so it is passed by value, not checked for nil. Returning an error
-// keeps the fail-closed posture at construction.
-func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, forwarder forward.Forwarder, ceiling *quota.Ceiling, origin OriginPolicy, emitter *audit.Emitter) (*Handler, error) {
-	if authn == nil || validator == nil || forwarder == nil || ceiling == nil || emitter == nil {
-		return nil, errors.New("ingress: NewHandler requires non-nil authn, validator, forwarder, ceiling, and emitter (fail-closed)")
+// emitter (no F10 audit, so a forward could ack without a durable record —
+// NFR-SEC-03), or serializer (no per-session tool-call ordering — NFR-IC-05)
+// would each silently defeat an invariant. The origin policy is a value (its zero
+// value admits only originless requests — the safe DNS-rebinding default), so it
+// is passed by value, not checked for nil. Returning an error keeps the
+// fail-closed posture at construction.
+func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, forwarder forward.Forwarder, ceiling *quota.Ceiling, origin OriginPolicy, emitter *audit.Emitter, serializer *serialize.Serializer) (*Handler, error) {
+	if authn == nil || validator == nil || forwarder == nil || ceiling == nil || emitter == nil || serializer == nil {
+		return nil, errors.New("ingress: NewHandler requires non-nil authn, validator, forwarder, ceiling, emitter, and serializer (fail-closed)")
 	}
-	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling, origin: origin, emitter: emitter}, nil
+	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling, origin: origin, emitter: emitter, serializer: serializer}, nil
 }
 
 // ServeHTTP routes the MCP JSON-RPC POST surface. Only POST is accepted; the
@@ -146,13 +151,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (5) Forward (F5) under the gateway service identity — invariant #3. The
-	// SessionRequest carries the resolved principal (no credential) and the
-	// validated tool-call; the caller bearer is not reachable from it.
 	req := forward.SessionRequest{
 		Principal: caller,
 		ToolCall:  toolCallFrom(raw),
 	}
+
+	// (4b) Per-session tool-call serialization — NFR-IC-05. Tool execution is
+	// serialized per session by default; parallelism is a per-skill deployment
+	// opt-in, never a caller body field. This runs AFTER the ceiling (which bounds
+	// total in-flight first) and AFTER validation (so the tool name for the
+	// parallel predicate comes from a validated body). The session key is the
+	// resolved caller's session hint (a HINT, NFR-SEC-43), never an authority. The
+	// slot is held across forward + emit (settled state) so call N+1 of a session
+	// cannot overtake the durable record of call N — the per-session history is
+	// strictly executed → recorded → next. A session queue at its bound is refused
+	// (fail-closed), never parked unboundedly (a DoS guard on the caller-supplied
+	// key).
+	srel, serr := h.serializer.Acquire(caller.Tenant, req.ToolCall.Name)
+	if serr != nil {
+		writeRPCError(w, http.StatusTooManyRequests, rpcInternalError, "session serialization queue full")
+		return
+	}
+	defer srel()
+
+	// (5) Forward (F5) under the gateway service identity — invariant #3. The
+	// SessionRequest carries the resolved principal (no credential) and the
+	// validated tool-call; the caller bearer is not reachable from it.
 	resp, ferr := h.forwarder.Forward(r.Context(), req)
 	if ferr != nil {
 		// Fail-closed: a forward failure is a refusal, leak-free.
