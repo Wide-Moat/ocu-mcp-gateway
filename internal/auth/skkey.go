@@ -37,9 +37,11 @@ type KeyRecord struct {
 	Salt string
 	// Tenant is the tenant this key authenticates as.
 	Tenant string
-	// Audience is the deployment-scope / audience-equivalent this key is valid
-	// for. A key absent from THIS deployment's set never resolves.
-	Audience string
+	// Deployment is the deployment scope this key is valid for (the key-set
+	// schema's `deployment`, ADR-0027). A key whose deployment does not match this
+	// gateway's deployment is refused (the resolve-time second layer of the
+	// deployment guard; the boot loader also refuses a heterogeneous set).
+	Deployment string
 	// ExpiresAt is the optional expiry; the zero value means non-expiring (the
 	// one-click path is not blocked by a forced expiry).
 	ExpiresAt time.Time
@@ -67,23 +69,30 @@ const (
 // and constant-time compares against that record's stored hash.
 type staticKeySet struct {
 	records []KeyRecord
+	// deployment is this gateway's own deployment scope. Resolve refuses a record
+	// whose Deployment does not match it (the resolve-time second layer of the
+	// deployment guard, defence-in-depth behind the boot loader's homogeneity
+	// check). It is set from the gateway's -deployment config at construction.
+	deployment string
 	// now is injected so a test can drive expiry deterministically; production
 	// passes time.Now.
 	now func() time.Time
 }
 
-// NewStaticKeySet builds a minimal-shelf KeySet from boot-loaded records. The now
-// func defaults to time.Now when nil. An empty record set is permitted (it simply
-// authenticates nothing — fail-closed), so boot can distinguish "loaded, empty"
-// from "failed to load" at the loader seam rather than here.
-func NewStaticKeySet(records []KeyRecord, now func() time.Time) KeySet {
+// NewStaticKeySet builds a minimal-shelf KeySet from boot-loaded records, bound to
+// this gateway's deployment. The now func defaults to time.Now when nil. An empty
+// record set is permitted (it simply authenticates nothing — fail-closed), so boot
+// can distinguish "loaded, empty" from "failed to load" at the loader seam rather
+// than here. Resolve refuses any record whose Deployment does not equal deployment
+// (the resolve-time deployment guard).
+func NewStaticKeySet(records []KeyRecord, deployment string, now func() time.Time) KeySet {
 	if now == nil {
 		now = time.Now
 	}
 	// Copy the slice so a caller cannot mutate the set after construction.
 	cp := make([]KeyRecord, len(records))
 	copy(cp, records)
-	return &staticKeySet{records: cp, now: now}
+	return &staticKeySet{records: cp, deployment: deployment, now: now}
 }
 
 // Resolve hashes the presented bearer with each active, unexpired record's salt
@@ -112,6 +121,13 @@ func (s *staticKeySet) Resolve(bearer string) (Caller, error) {
 		if !rec.ExpiresAt.IsZero() && now.After(rec.ExpiresAt) {
 			continue
 		}
+		// Resolve-time deployment guard (layer ii): a record scoped to another
+		// deployment never authenticates here, even if it somehow reached the set
+		// past the boot loader's homogeneity check (a future non-boot load path).
+		// A confused-deputy foreign key thus cannot resolve against this gateway.
+		if rec.Deployment != s.deployment {
+			continue
+		}
 		want, err := hex.DecodeString(rec.KeyHash)
 		if err != nil {
 			// A malformed stored hash never authenticates; skip it fail-closed
@@ -135,9 +151,9 @@ func (s *staticKeySet) Resolve(bearer string) (Caller, error) {
 		return Caller{}, ErrUnauthenticated
 	}
 	return Caller{
-		KeyID:    matched.KeyID,
-		Tenant:   matched.Tenant,
-		Audience: matched.Audience,
+		KeyID:      matched.KeyID,
+		Tenant:     matched.Tenant,
+		Deployment: matched.Deployment,
 	}, nil
 }
 
@@ -171,26 +187,50 @@ func HashForRecord(saltHex, secret string) (string, error) {
 // concrete that plugs into the ingress Handler on the minimal shelf; the
 // full-shelf OAuth-RS authenticator is a sibling concrete behind the same seam.
 type staticAuthenticator struct {
-	keys KeySet
+	// provider returns the CURRENT key set on each call, so a boot-set Refresh
+	// (an atomic swap upstream) takes effect on the next resolve without rebuilding
+	// the authenticator. A snapshot authenticator wraps a constant provider.
+	provider func() KeySet
 }
 
-// NewStaticAuthenticator builds the minimal-shelf authenticator over a boot-loaded
-// key set. A nil set is a construction error (fail-closed): an authenticator with
-// no set would have nothing to validate against.
+// NewStaticAuthenticator builds the minimal-shelf authenticator over a FIXED
+// boot-loaded key set (a snapshot). A nil set is a construction error
+// (fail-closed): an authenticator with no set would have nothing to validate
+// against. Use NewStaticAuthenticatorLive when the set is refreshed at runtime.
 func NewStaticAuthenticator(keys KeySet) (CallerAuthenticator, error) {
 	if keys == nil {
 		return nil, fmt.Errorf("auth: NewStaticAuthenticator requires a non-nil KeySet (fail-closed)")
 	}
-	return &staticAuthenticator{keys: keys}, nil
+	return &staticAuthenticator{provider: func() KeySet { return keys }}, nil
 }
 
-// Authenticate resolves the transport bearer against the boot-loaded set. It
-// reads identity ONLY from cred.Bearer (transport material), never a body, and
-// performs no per-request Control lookup. An empty bearer or any resolution miss
-// is ErrUnauthenticated (fail-closed).
+// NewStaticAuthenticatorLive builds the authenticator over a LIVE key-set
+// provider (the boot sequencer's live pointer), so a Refresh that swaps the set
+// is seen on the next resolve — the path by which a revoked key stops
+// authenticating within the refresh window (NFR-SEC-04). A nil provider is a
+// construction error. The provider MAY return nil (e.g. before the first load);
+// Authenticate treats a nil set as authenticate-nothing (fail-closed), never a
+// nil-deref or an admit-all.
+func NewStaticAuthenticatorLive(provider func() KeySet) (CallerAuthenticator, error) {
+	if provider == nil {
+		return nil, fmt.Errorf("auth: NewStaticAuthenticatorLive requires a non-nil provider (fail-closed)")
+	}
+	return &staticAuthenticator{provider: provider}, nil
+}
+
+// Authenticate resolves the transport bearer against the CURRENT boot-loaded set.
+// It reads identity ONLY from cred.Bearer (transport material), never a body, and
+// performs no per-request Control lookup. An empty bearer, a nil current set, or
+// any resolution miss is ErrUnauthenticated (fail-closed).
 func (a *staticAuthenticator) Authenticate(_ context.Context, cred TransportCredential) (Caller, error) {
 	if cred.Bearer == "" {
 		return Caller{}, ErrUnauthenticated
 	}
-	return a.keys.Resolve(cred.Bearer)
+	ks := a.provider()
+	if ks == nil {
+		// No current set (pre-load, or a provider returning nil) → authenticate
+		// nothing, never nil-deref or admit-all.
+		return Caller{}, ErrUnauthenticated
+	}
+	return ks.Resolve(cred.Bearer)
 }

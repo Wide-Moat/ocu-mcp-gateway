@@ -57,7 +57,7 @@ func TestProvisioningComesFromPolicyNotBody(t *testing.T) {
 // TestSessionHintIsCallerTenantOnly proves the hint is the caller principal's
 // non-secret Tenant handle — never a credential, never an authority.
 func TestSessionHintIsCallerTenantOnly(t *testing.T) {
-	got := sessionHintFor(auth.Caller{KeyID: "k9", Tenant: "tenant-b", Audience: "deploy-x"})
+	got := sessionHintFor(auth.Caller{KeyID: "k9", Tenant: "tenant-b", Deployment: "deploy-x"})
 	if got != "tenant-b" {
 		t.Errorf("session hint must be the caller Tenant handle, got %q", got)
 	}

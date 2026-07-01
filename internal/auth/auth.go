@@ -95,10 +95,11 @@ type Caller struct {
 	// Tenant is the tenant the resolved record binds the caller to. It comes
 	// from the record, never from a body field or a key-embedded claim.
 	Tenant string
-	// Audience is the deployment-scope / audience-equivalent the resolved record
-	// is scoped to. A credential absent from THIS deployment's set never
-	// resolves, so a resolved Caller is audience-valid by construction.
-	Audience string
+	// Deployment is the deployment scope the resolved record is bound to (the
+	// key-set schema's `deployment`, ADR-0027). A credential whose record
+	// deployment does not match this gateway's deployment is refused, so a
+	// resolved Caller is deployment-valid by construction (NFR-SEC-87).
+	Deployment string
 }
 
 // CallerAuthenticator is the caller-authentication seam. A concrete

@@ -45,7 +45,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 		ceiling = quota.NewCeiling(64)
 	}
 	h, err := NewHandler(
-		acceptAuth{caller: auth.Caller{KeyID: "k1", Tenant: "t1", Audience: "a1"}},
+		acceptAuth{caller: auth.Caller{KeyID: "k1", Tenant: "t1", Deployment: "a1"}},
 		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), newEmitter(t), newSerializer(t),
 	)
 	if err != nil {
