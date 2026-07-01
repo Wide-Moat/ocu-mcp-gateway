@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
@@ -17,6 +18,43 @@ import (
 
 // body wraps a JSON string as an io.Reader for an HTTP POST.
 func body(s string) io.Reader { return strings.NewReader(s) }
+
+// durableSink is a test audit Sink that durably accepts every event (returns
+// nil). It models a healthy audit bus so handler tests reach the post-audit
+// path; tests that exercise the fail-closed audit path use failingSink.
+type durableSink struct{ count int }
+
+func (s *durableSink) Publish(context.Context, string, []byte) error {
+	s.count++
+	return nil
+}
+
+// failingSink is a test audit Sink whose durable write always fails, so a handler
+// test can drive the audit-write-failure-is-refusal path.
+type failingSink struct{}
+
+func (failingSink) Publish(context.Context, string, []byte) error {
+	return context.DeadlineExceeded
+}
+
+// capturingSink durably accepts events and records the payloads so a test can
+// assert what was emitted (e.g. that the actor is host-attested).
+type capturingSink struct{ payloads [][]byte }
+
+func (s *capturingSink) Publish(_ context.Context, _ string, payload []byte) error {
+	s.payloads = append(s.payloads, payload)
+	return nil
+}
+
+// newEmitter builds a durable test emitter for handler wiring.
+func newEmitter(t *testing.T) *audit.Emitter {
+	t.Helper()
+	em, err := audit.NewEmitter(&durableSink{})
+	if err != nil {
+		t.Fatalf("build emitter: %v", err)
+	}
+	return em
+}
 
 // rejectAllAuth is a test authenticator that refuses every credential. It models
 // the fail-closed auth boundary so a test can drive the 401 path.
@@ -71,7 +109,7 @@ func newValidator(t *testing.T) *profile.Validator {
 // boundary-order tests that only vary the auth outcome.
 func newTestHandler(t *testing.T, authn auth.CallerAuthenticator) *Handler {
 	t.Helper()
-	h, err := NewHandler(authn, newValidator(t), &recordingForwarder{err: forward.ErrForwardFailed}, quota.NewCeiling(64), NewOriginPolicy(nil))
+	h, err := NewHandler(authn, newValidator(t), &recordingForwarder{err: forward.ErrForwardFailed}, quota.NewCeiling(64), NewOriginPolicy(nil), newEmitter(t))
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}

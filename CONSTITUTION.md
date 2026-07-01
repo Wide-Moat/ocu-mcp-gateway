@@ -81,12 +81,27 @@ on any path reaching the sandbox; the forward carries only the gateway's own
 service identity. This is a **type fact**: the forward shapes have no field that
 could carry the credential.
 
+The transport (P1 dial skeleton) presents the gateway's OWN service credential —
+the host-side service-to-service "Generic internal token" (component-01:39, §8) —
+over an mTLS-1.3 leg (NFR-SEC-37), never the caller's credential and never an
+operator scope (P1-S2). A forward with no service credential is refused, never
+sent anonymously (NFR-SEC-26). The session-request WIRE FIELDS are NOT invented in
+this repo: they come from the frozen Control session-setup schema (PR #293) and
+plug into the seam when vendored — so the dial path fails closed pending #293
+rather than fabricating a cross-component body.
+
 - **Enforcement:** `internal/forward/no_credential_test.go`
   (`TestForwardShapesCarryNoCredential` — a reflect pass over every forward shape
   plus an AST scan of the package source reject any credential-named field;
   planting a `Bearer` field goes RED on both) and
   `internal/ingress/invariants_test.go` (`TestInvariant3_NoCredentialOnForward` —
-  the resolved principal rides the forward, the secret string does not).
+  the resolved principal rides the forward, the secret string does not). The P1
+  transport seam: `internal/forward/dial_test.go`
+  (`TestNewWithDialRequiresMTLSWhenEndpointSet` — a configured endpoint without
+  mTLS fails NFR-SEC-37; `TestNewWithDialRequiresServiceCredential` — a nil
+  service credential fails NFR-SEC-26; `TestDialForwardFailsClosedOnCredError` —
+  a credential error refuses the forward; `TestDialForwardPendingFrozenSchema` —
+  the dial path fails closed pending #293, never inventing the body).
 
 ## IV. No gateway route to the operator surface — code AND network (NFR-SEC-52)
 
@@ -191,6 +206,26 @@ rewrite.
   `TestStaticKeySetRejectsRevoked`, `TestStaticKeySetRejectsExpired`,
   `TestHashForRecordRejectsPrefixlessSecret`) and the boot-set loader
   `internal/config/loader_test.go`.
+
+## XI. F10 OCSF audit is emit-before-ack, fail-closed durable-first (NFR-SEC-03)
+
+Every terminated request is recorded as an OCSF ApiActivity event on the
+gateway's audit fan-in channel BEFORE the response is acknowledged; a durable
+audit-write failure REFUSES the request, never acks it. A 200 therefore always
+means the action took effect AND was durably recorded. The audit actor is the
+host-attested caller principal (the resolved KeyID), never a body claim
+(NFR-SEC-09). The per-source `sequence` is monotonic; the pipeline authors the
+hash-chain at ingest (the gateway supplies only the sequence). The contract is
+the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
+`mcpGatewayAudit`, payload OCSF ApiActivity).
+
+- **Enforcement:** `internal/ingress/invariants_test.go`
+  (`TestF10_AuditWriteFailureIsRefusal` — a forward that succeeds but whose audit
+  write fails is refused 500, not acked 200; planting an ignored emit error goes
+  RED) and (`TestF10_AuditActorIsHostAttested` — the emitted actor is the resolved
+  KeyID, a body `caller` claim does not appear). The emitter's own fail-closed
+  contract: `internal/audit/audit_test.go` (`TestEmitWriteFailureIsRefusal`,
+  `TestSequenceMonotonicAndUnique`, `TestEmitInvalidEnvelopeRefused`).
 
 ---
 

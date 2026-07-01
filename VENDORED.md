@@ -60,9 +60,17 @@ canon (the git blob OID matches), so its provenance is mechanically checkable.
 | Artifact | Vendored path | Canon path @ `62f5eeb` | Blob OID (canon == local) |
 |---|---|---|---|
 | OCU MCP constraint profile (2025-06-18) | `contracts/mcp/2025-06-18/ocu-constraints.schema.json` | `contracts/mcp/2025-06-18/ocu-constraints.schema.json` | `fbada4ed9e7eae31d4810156e63297d323c6cba7` |
+| OCU Audit fan-in (AsyncAPI 3.0.0) — F10 OCSF emit | `contracts/audit/audit-fanin.asyncapi.yaml` | `contracts/audit/audit-fanin.asyncapi.yaml` | `6beb0cab568c44572f0eec756f8028335cda2288` |
 
-SHA-256 of the vendored copy:
-`3efa305c1d5f573700d6d19d7eb1add9ff761a4cf5089b9031c7c820f339e77d`
+SHA-256 of the vendored copies:
+- `ocu-constraints.schema.json`: `3efa305c1d5f573700d6d19d7eb1add9ff761a4cf5089b9031c7c820f339e77d`
+- `audit-fanin.asyncapi.yaml`: `0c82d163b152ca3e5d8e31e89b892b012b9ccaf6a8170393bb875f5deb7e5114`
+
+> The gateway emits ONLY on the `mcpGatewayAudit` channel
+> (`audit.ingest.mcp-gateway`), payload OCSF **ApiActivity** (class 6003). The
+> hash-chain linkage (`prev_hash`/`chain_hash`) is authored by the pipeline at
+> ingest, NOT by the gateway — the gateway supplies the per-source monotonic
+> `sequence` (NFR-SEC-48) and the pipeline derives chain order.
 
 Verify the vendored copy is still byte-identical to its canon source:
 
