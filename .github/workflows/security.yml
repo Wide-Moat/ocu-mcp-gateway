@@ -120,6 +120,22 @@ jobs:
       - name: iac-policy gate (no gateway->operator route)
         run: python3 scripts/iac_policy_check.py
 
+  vendored-integrity:
+    # Byte-equality gate: every vendored canon artifact still hashes to the blob
+    # OID recorded in VENDORED.md, so a silent local mutation of a frozen contract
+    # reds CI. The self-test runs FIRST (two-sided): it proves a tampered file
+    # changes the OID, so a green run is not a silent no-op. stdlib only (no pip).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: vendored-check red-probe (RED-when-tampered, two-sided)
+        run: python3 scripts/vendored_check.py --self-test
+      - name: vendored-check gate (vendored copies match recorded blob OIDs)
+        run: python3 scripts/vendored_check.py
+
   conventional-commits:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'

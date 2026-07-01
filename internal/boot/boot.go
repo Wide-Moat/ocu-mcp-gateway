@@ -80,6 +80,52 @@ func (s *Sequencer) Ready() bool {
 	return s.ready.Load()
 }
 
+// Refresh re-loads the boot-set and atomically swaps in the new set, so a key
+// Control revoked (omitted from the re-rendered set) stops authenticating within
+// the refresh window (NFR-SEC-04, ≤5 min). It is the running counterpart of Load:
+// the authenticator reads the live set through KeySet(), so a successful Refresh
+// takes effect on the very next resolve without a rebind.
+//
+// A refresh FAILURE is fail-SAFE, not fail-open: the previously-loaded set is
+// KEPT (the swap only happens on success), so a transient unreadable/mis-rendered
+// boot-set during a refresh does not blank the gateway's auth material and lock
+// everyone out. The error is returned so the caller can log/alert; readiness is
+// unchanged (the gateway was already ready). This is the deliberate asymmetry
+// with boot Load — an absent set at BOOT is fail-closed (never bind), but an
+// absent set at REFRESH keeps the last-good set rather than failing open OR
+// blanking auth. Revocation still converges on the next successful refresh.
+func (s *Sequencer) Refresh(ctx context.Context) error {
+	if !s.ready.Load() {
+		// Refresh before a successful Load is a programming error; do not fabricate
+		// readiness. Boot must Load first.
+		return fmt.Errorf("%w: refresh called before initial load", ErrNotReady)
+	}
+	ks, err := s.loader.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("boot: refresh failed, keeping the last-good key set: %w", err)
+	}
+	if ks == nil {
+		return fmt.Errorf("boot: refresh returned a nil key set, keeping the last-good set")
+	}
+	s.keys.Store(&ks)
+	return nil
+}
+
+// LiveKeySet returns a provider that reads the CURRENT loaded set on each call,
+// so an authenticator built over it sees a Refresh immediately. It returns the
+// last-good set; before the first Load it returns nil (which a fail-closed
+// authenticator treats as authenticate-nothing). The provider never blocks and
+// never returns a partially-swapped set (the swap is a single atomic store).
+func (s *Sequencer) LiveKeySet() func() auth.KeySet {
+	return func() auth.KeySet {
+		p := s.keys.Load()
+		if p == nil {
+			return nil
+		}
+		return *p
+	}
+}
+
 // KeySet returns the loaded boot-set, or an error if called before a successful
 // Load. The authenticator the handler uses is built from this set; requesting it
 // before readiness is a fail-closed error, never a nil-set admit.

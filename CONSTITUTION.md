@@ -215,21 +215,45 @@ readiness.
   `cmd/ocu-mcp-gatewayd/main.go` (binds only after `seq.Ready()` and aborts on a
   load failure before any `net.Listen`).
 
-## X. The caller-auth wire format is a seam (ADR-0027, gated on PR #311)
+## X. The caller-auth wire format is ratified (ADR-0027, NFR-SEC-87 floor)
 
 The minimal-shelf static `sk-ocu-` validator and the full-shelf OAuth 2.1 RS
-validator are two shelves of one `CallerAuthenticator` interface. The minimal
-shelf stores only salted SHA-256 (never plaintext, rejecting unsalted per
-GHSA-69x8-hrgq-fjj8), compares constant-time, and validates against boot-loaded
-material in-process — never a per-request Control lookup. The final wire format
-lands when ADR-0027 (PR #311) merges to canon; the seam plugs it in without a
-rewrite.
+validator are two shelves of one `CallerAuthenticator` interface. ADR-0027 is
+**accepted**, and its wire contract is now a **vendored artifact**:
+`contracts/mcp/mcp-key-set.schema.json` (the Control→gateway hashed-key boot-set,
+byte-identical from canon, `VENDORED.md`).
+
+The minimal shelf enforces the NFR-SEC-87 floor: it stores only salted SHA-256
+(`sha256(salt‖secret)`, hex, never plaintext, rejecting the unsalted digest per
+GHSA-69x8-hrgq-fjj8), compares **constant-time** (`subtle.ConstantTimeCompare`,
+no early-exit), and validates against boot-loaded material in-process — never a
+per-request Control lookup. The boot-set is **schema-validated at load, fail-closed**
+(an empty records set, a non-`active` status, a malformed hash, a short salt, or an
+extra field are all refused — the set is boot-rejected, never served with holes).
+The `deployment` scope is guarded in **two layers**: (i) at boot, a set with any
+record scoped to another deployment reds the WHOLE load (`-deployment` is required;
+empty is boot-reject), and (ii) at resolve, a record whose deployment ≠ this
+gateway's never authenticates — closing the confused-deputy foreign-set class. A
+key absent from the set, a wrong secret, a revoked/expired (hence omitted) key, or
+a deployment mismatch is refused with `401` and an unconditional `WWW-Authenticate:
+Bearer` challenge. Revocation converges within the NFR-SEC-04 window: the boot-set
+is **re-loaded periodically** (`-boot-set-refresh` < 5 min) with an atomic swap, so
+a revoked key stops authenticating on the next resolve; a refresh failure keeps the
+last-good set (fail-safe, never blanking auth). The plaintext `sk-ocu-` key is
+NEVER logged or emitted to audit — the audit actor is the `key_id`, never the
+secret.
 
 - **Enforcement:** `internal/auth/skkey_test.go` (the real salted-SHA-256 path:
-  `TestStaticKeySetResolvesActiveKey`, `TestStaticKeySetRejectsWrongSecret`,
-  `TestStaticKeySetRejectsRevoked`, `TestStaticKeySetRejectsExpired`,
-  `TestHashForRecordRejectsPrefixlessSecret`) and the boot-set loader
-  `internal/config/loader_test.go`.
+  `TestStaticKeySetResolvesActiveKey`, `…RejectsWrongSecret`, `…RejectsRevoked`,
+  `…RejectsExpired`, `…RejectsForeignDeploymentRecord`, and the code-fact
+  `TestResolveUsesConstantTimeCompare`); the schema gate `internal/keyset/`
+  (`TestSchemaRejects` — empty-set / non-active / malformed-hash / extra-field all
+  refused); the boot-set loader `internal/config/loader_test.go`
+  (`TestFileLoaderForeignDeploymentBootRejects`, `…EmptyDeploymentFailsClosed`,
+  `…NonActiveStatusFailsSchema`, `…ExtraFieldFailsSchema`); and the refresh path
+  `internal/boot/boot_test.go` (`TestRefreshSwapsInNewSet`,
+  `TestRefreshFailureKeepsLastGoodSet`). The vendored schema is byte-pinned by
+  `scripts/vendored_check.py`.
 
 ## XI. F10 OCSF audit is emit-before-ack, fail-closed durable-first (NFR-SEC-03)
 

@@ -55,16 +55,18 @@ func main() {
 // address, the boot-set path, the pinned-revision (fixed in code, not retunable),
 // the service-identity name, and the Control endpoint.
 type options struct {
-	version        bool
-	healthCheck    bool
-	listenAddr     string
-	bootSetPath    string
-	identity       string
-	controlURL     string
-	connCeiling    int
-	allowedOrigins originList
-	auditBus       string
-	serializeDepth int
+	version         bool
+	healthCheck     bool
+	listenAddr      string
+	bootSetPath     string
+	identity        string
+	controlURL      string
+	connCeiling     int
+	allowedOrigins  originList
+	auditBus        string
+	serializeDepth  int
+	deployment      string
+	refreshInterval time.Duration
 }
 
 // originList is a repeatable string flag collecting allowed Origin values for the
@@ -86,6 +88,8 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.listenAddr, "listen", "127.0.0.1:8080", "MCP listener bind address")
 	fs.StringVar(&o.bootSetPath, "boot-set", "", "path to the Control-owned hashed boot-set file")
 	fs.StringVar(&o.identity, "service-identity", "ocu-mcp-gateway", "gateway service identity name presented on F5")
+	fs.StringVar(&o.deployment, "deployment", "", "this gateway's deployment scope (REQUIRED; the boot-set must be homogeneous and equal to it — a foreign-deployment record boot-rejects the whole set, ADR-0027)")
+	fs.DurationVar(&o.refreshInterval, "boot-set-refresh", 2*time.Minute, "boot-set re-load interval; a revoked key stops authenticating within this window (must be < the NFR-SEC-04 5-min floor)")
 	fs.StringVar(&o.controlURL, "control-url", "", "Control/operator API base URL (F5 forward target)")
 	fs.IntVar(&o.connCeiling, "conn-ceiling", 64, "max concurrent in-flight requests per audience-validated caller (NFR-SEC-53)")
 	fs.Var(&o.allowedOrigins, "allowed-origin", "allowed browser Origin for the DNS-rebinding guard (repeatable); originless callers are always allowed")
@@ -125,11 +129,23 @@ func serve(ctx context.Context, o options) error {
 	if o.bootSetPath == "" {
 		return errors.New("serve: -boot-set is required (the gateway authenticates against the Control-owned boot-set; fail-closed)")
 	}
+	if o.deployment == "" {
+		return errors.New("serve: -deployment is required (the boot-set deployment guard cannot be disabled; a foreign-deployment set must boot-reject, ADR-0027; fail-closed)")
+	}
+	// The refresh interval must be under the NFR-SEC-04 5-min revocation floor: a
+	// key Control revoked must stop authenticating within 5 min, so re-loading no
+	// more often than every 5 min would miss the window. A non-positive interval
+	// would disable refresh (revocation would never converge) — refuse it.
+	const revocationFloor = 5 * time.Minute
+	if o.refreshInterval <= 0 || o.refreshInterval >= revocationFloor {
+		return fmt.Errorf("serve: -boot-set-refresh must be > 0 and < %s (the NFR-SEC-04 revocation floor); got %s", revocationFloor, o.refreshInterval)
+	}
 
 	// Build the boot-set loader and run the load-before-bind sequencer. The
-	// listener is bound ONLY after Load succeeds (invariant #9): an unreadable
-	// boot-set aborts boot before any socket exists.
-	loader := &config.FileKeySetLoader{Path: o.bootSetPath, Now: time.Now}
+	// listener is bound ONLY after Load succeeds (invariant #9): an unreadable,
+	// schema-invalid, or foreign-deployment boot-set aborts boot before any socket
+	// exists.
+	loader := &config.FileKeySetLoader{Path: o.bootSetPath, Deployment: o.deployment, Now: time.Now}
 	seq, err := boot.NewSequencer(loader)
 	if err != nil {
 		return fmt.Errorf("serve: build sequencer: %w", err)
@@ -138,15 +154,21 @@ func serve(ctx context.Context, o options) error {
 		return fmt.Errorf("serve: boot-set load failed, not binding listener: %w", err)
 	}
 
-	// Build the caller authenticator over the boot-loaded set.
-	keys, err := seq.KeySet()
-	if err != nil {
-		return fmt.Errorf("serve: key set unavailable after load: %w", err)
-	}
-	authn, err := auth.NewStaticAuthenticator(keys)
+	// Build the caller authenticator over the LIVE boot-set (the sequencer's live
+	// pointer), so a periodic Refresh that drops a revoked key takes effect on the
+	// next resolve without a rebind (NFR-SEC-04). Boot Load already succeeded, so
+	// the provider returns a non-nil set now.
+	authn, err := auth.NewStaticAuthenticatorLive(seq.LiveKeySet())
 	if err != nil {
 		return fmt.Errorf("serve: build authenticator: %w", err)
 	}
+
+	// Start the boot-set refresh loop: re-load within the NFR-SEC-04 window so a
+	// key Control revoked (omitted from the re-rendered set) stops authenticating
+	// within ≤5 min. A refresh failure keeps the last-good set (fail-safe, not
+	// fail-open and not auth-blanking); it is logged, and convergence resumes on
+	// the next successful refresh. The loop stops when ctx is cancelled (shutdown).
+	go runRefreshLoop(ctx, seq, o.refreshInterval)
 
 	// Build the constraint-profile validator (base pass + OCU overlay).
 	validator, err := profile.NewValidator(profile.NewJSONRPCBaseValidator(), profile.DefaultLimits())
@@ -202,4 +224,27 @@ func serve(ctx context.Context, o options) error {
 	srv := ingress.NewServer(ln, handler)
 	fmt.Printf("ocu-mcp-gatewayd: serving MCP on %s (service-identity %q)\n", o.listenAddr, o.identity)
 	return srv.Serve(ctx)
+}
+
+// runRefreshLoop re-loads the boot-set every interval so a revoked key stops
+// authenticating within the NFR-SEC-04 window. It returns when ctx is cancelled
+// (shutdown). A refresh error keeps the last-good set (fail-safe) and is logged;
+// it never blanks auth and never fails the process. The plaintext key is never in
+// the boot-set or this log — only the error class is printed.
+func runRefreshLoop(ctx context.Context, seq *boot.Sequencer, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := seq.Refresh(ctx); err != nil {
+				// Keep the last-good set; surface the failure for the operator. No
+				// secret material appears in the error (the boot-set holds only
+				// hashes; the error names the cause class, not any key).
+				fmt.Fprintf(os.Stderr, "ocu-mcp-gatewayd: boot-set refresh failed (keeping last-good set): %v\n", err)
+			}
+		}
+	}
 }
