@@ -271,8 +271,13 @@ secret.
 
 - **Enforcement:** `internal/auth/skkey_test.go` (the real salted-SHA-256 path:
   `TestStaticKeySetResolvesActiveKey`, `…RejectsWrongSecret`, `…RejectsRevoked`,
-  `…RejectsExpired`, `…RejectsForeignDeploymentRecord`, and the code-fact
-  `TestResolveUsesConstantTimeCompare`); the schema gate `internal/keyset/`
+  `…RejectsExpired`, `…RejectsForeignDeploymentRecord`) and the constant-time pin
+  `internal/auth/constant_time_ast_test.go` (`TestResolveUsesConstantTimeCompare`
+  — an AST inspection of Resolve's BODY, replacing a grep-mechanics version a
+  self-audit proved vacuous: it requires a subtle.ConstantTimeCompare CALL inside
+  Resolve, and forbids bytes.Equal, any ==/!= over a call or indexed value, and
+  any `break` in the record loop, so a non-constant-time rewrite with a dead
+  token reference goes RED); the schema gate `internal/keyset/`
   (`TestSchemaRejects` — empty-set / non-active / malformed-hash / extra-field all
   refused); the boot-set loader `internal/config/loader_test.go`
   (`TestFileLoaderForeignDeploymentBootRejects`, `…EmptyDeploymentFailsClosed`,
