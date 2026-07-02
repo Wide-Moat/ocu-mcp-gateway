@@ -122,9 +122,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// caller identity, so it runs strictly AFTER auth (the ceiling is "per
 	// audience-validated caller", NFR-SEC-53). Excess is REFUSED (429), never
 	// queued, so one caller cannot exhaust the fd table. The slot is held for the
-	// duration of this request and released on return.
+	// duration of this request and released on return. A ceiling refusal is a
+	// TERMINATED request with a validated identity, so it is recorded (§XI): the
+	// refusal audit is durable-first fail-closed, symmetric to success — if the
+	// refusal cannot be recorded the request is 500, never a silently-unrecorded
+	// rejection (a repudiation hole).
 	release, qerr := h.ceiling.Acquire(caller.KeyID)
 	if qerr != nil {
+		if !h.recordRefusal(w, r, caller.KeyID, "tools/call:(ceiling-refused)") {
+			return
+		}
 		writeRPCError(w, http.StatusTooManyRequests, rpcInternalError, "connection ceiling exceeded")
 		return
 	}
@@ -179,7 +186,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// validated tool-call; the caller bearer is not reachable from it.
 	resp, ferr := h.forwarder.Forward(r.Context(), req)
 	if ferr != nil {
-		// Fail-closed: a forward failure is a refusal, leak-free.
+		// Fail-closed: a forward failure is a refusal, leak-free. It is a
+		// terminated request with a validated identity, so it is recorded (§XI)
+		// durable-first before the 502 — symmetric to the success emit.
+		if !h.recordRefusal(w, r, caller.KeyID, boundedResource(req.ToolCall.Name)) {
+			return
+		}
 		writeRPCError(w, http.StatusBadGateway, rpcInternalError, "forward refused")
 		return
 	}
@@ -217,6 +229,43 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (7) Leak-free response — invariant #5. Only the bounded result + the stable
 	// correlation id reach the caller.
 	writeResult(w, resp)
+}
+
+// recordRefusal durably records a TERMINATED, post-auth refusal (§XI, F11): a
+// ceiling (429) or forward (502) refusal of a request whose caller identity was
+// already validated. It emits an OutcomeFailure OCSF event with the host-attested
+// actor (KeyID), durable-first fail-closed and SYMMETRIC to the success emit —
+// the repudiation control (NFR-SEC-03) is that the record EXISTS, so a refusal we
+// cannot durably record is a repudiation hole, not a swallow.
+//
+// It returns true when the caller may proceed to write the intended refusal
+// status (the audit event landed). It returns false when the audit write FAILED —
+// in which case it has already written a leak-free 500, and the caller must
+// return without writing the original refusal code (a refusal we could not record
+// becomes a 500, never a silently-unrecorded rejection).
+//
+// Pre-auth refusals (401 auth-fail, 403 origin) do NOT call this: at their
+// boundary order no caller is resolved, so there is no attested actor to record.
+// That omission is deliberate (a placeholder actor would be false attribution);
+// it is documented on the audit package and pinned by TestPreAuthRefusalsDoNotEmit.
+func (h *Handler) recordRefusal(w http.ResponseWriter, r *http.Request, actorKeyID, resource string) (proceed bool) {
+	correlation := newCorrelationID()
+	env := audit.Envelope{
+		TraceID:   correlation,
+		SessionID: correlation,
+		ActorID:   actorKeyID,
+		Resource:  resource,
+		Action:    "tool_call",
+		Outcome:   audit.OutcomeFailure,
+	}
+	if err := h.emitter.Emit(r.Context(), env); err != nil {
+		// The refusal could not be durably recorded → fail closed with a 500,
+		// exactly as the success path does on an audit-write failure. The caller
+		// must NOT then also write the original refusal code.
+		writeRPCError(w, http.StatusInternalServerError, rpcInternalError, "audit write failed")
+		return false
+	}
+	return true
 }
 
 // bearerFromHeader extracts the raw bearer from the Authorization header. The
