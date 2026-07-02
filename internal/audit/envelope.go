@@ -2,9 +2,18 @@
 // Copyright (c) 2025 Open Computer Use Contributors
 
 // Package audit is the F10 OCSF audit fan-in emitter for the MCP gateway. It
-// emits one OCSF ApiActivity event per terminated request (with the validated,
-// host-attested caller identity) plus a rejection event on a connection-ceiling
-// refusal, on the gateway's own fan-in channel (audit.ingest.mcp-gateway).
+// emits one OCSF ApiActivity event per terminated request WITH A VALIDATED
+// IDENTITY — the success path plus the post-auth refusals (a 429 connection-
+// ceiling refusal and a 502 forward refusal), each with the host-attested caller
+// identity — on the gateway's own fan-in channel (audit.ingest.mcp-gateway).
+//
+// The two PRE-AUTH refusals (a 401 auth-failure and a 403 origin rejection) fire
+// before a caller is resolved, so they have NO attested actor and are counted at
+// the transport layer, NOT the OCSF fan-in. This is a DELIBERATE omission, not a
+// gap: a placeholder actor on an OCSF event would be false attribution, worse
+// than the omission (NFR-SEC-09 — the audit actor is host-attested or absent,
+// never guessed). The exclusion is pinned by
+// internal/ingress/refusal_audit_test.go (TestPreAuthRefusalsDoNotEmit).
 //
 // The contract is the vendored audit-fanin AsyncAPI (contracts/audit/
 // audit-fanin.asyncapi.yaml, byte-identical from canon; see VENDORED.md). The
@@ -42,8 +51,10 @@ type Outcome string
 const (
 	// OutcomeSuccess — the request was handled and forwarded without refusal.
 	OutcomeSuccess Outcome = "success"
-	// OutcomeFailure — the request was refused (auth, validation, ceiling,
-	// forward fail-closed).
+	// OutcomeFailure — a terminated request WITH A VALIDATED IDENTITY was refused
+	// after auth: a connection-ceiling refusal (429) or a forward fail-closed
+	// refusal (502). Pre-auth refusals (401/403) carry no attested actor and are
+	// not emitted (see the package doc).
 	OutcomeFailure Outcome = "failure"
 	// OutcomeUnknown — the outcome could not be determined (reserved; the
 	// gateway resolves to success/failure in practice).

@@ -288,14 +288,26 @@ secret.
 
 ## XI. F10 OCSF audit is emit-before-ack, fail-closed durable-first (NFR-SEC-03)
 
-Every terminated request is recorded as an OCSF ApiActivity event on the
-gateway's audit fan-in channel BEFORE the response is acknowledged; a durable
-audit-write failure REFUSES the request, never acks it. A 200 therefore always
-means the action took effect AND was durably recorded. The audit actor is the
-host-attested caller principal (the resolved KeyID), never a body claim
-(NFR-SEC-09). The per-source `sequence` is monotonic; the pipeline authors the
-hash-chain at ingest (the gateway supplies only the sequence). The contract is
-the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
+Every terminated request **with a validated identity** is recorded as an OCSF
+ApiActivity event on the gateway's audit fan-in channel BEFORE the response is
+acknowledged; a durable audit-write failure REFUSES the request, never acks it. A
+200 therefore always means the action took effect AND was durably recorded. This
+holds for the SUCCESS path AND for the post-auth REFUSAL paths — a ceiling
+refusal (429) and a forward refusal (502) each emit an `OutcomeFailure` event
+with the resolved actor, durable-first fail-closed and SYMMETRIC to success: a
+refusal we could not durably record is a repudiation hole, so it becomes a 500,
+never a silently-unrecorded rejection (§XI, canon spec lines 64/75).
+
+The two PRE-AUTH refusals — a 401 auth-failure and a 403 origin rejection — fire
+before any caller is resolved, so they carry no host-attested actor and are a
+DELIBERATE transport-layer omission (a placeholder actor would be false
+attribution in OCSF, worse than omission), NOT a gap. This is documented on the
+audit package and pinned by a test so the exclusion cannot silently erode.
+
+The audit actor is the host-attested caller principal (the resolved KeyID), never
+a body claim (NFR-SEC-09). The per-source `sequence` is monotonic; the pipeline
+authors the hash-chain at ingest (the gateway supplies only the sequence). The
+contract is the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
 `mcpGatewayAudit`, payload OCSF ApiActivity).
 
 - **Enforcement:** `internal/ingress/invariants_test.go`
@@ -304,7 +316,14 @@ the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
   RED) and (`TestF10_AuditActorIsHostAttested` — the emitted actor is the resolved
   KeyID, a body `caller` claim does not appear). The emitter's own fail-closed
   contract: `internal/audit/audit_test.go` (`TestEmitWriteFailureIsRefusal`,
-  `TestSequenceMonotonicAndUnique`, `TestEmitInvalidEnvelopeRefused`).
+  `TestSequenceMonotonicAndUnique`, `TestEmitInvalidEnvelopeRefused`). The §XI
+  refusal-recording: `internal/ingress/refusal_audit_test.go`
+  (`TestForwardRefusalIsRecorded` / `TestCeilingRefusalIsRecorded` — a 502/429
+  post-auth refusal records exactly one OutcomeFailure event with the resolved
+  actor; removing either refusal emit goes RED; `TestRefusalAuditIsFailClosed` —
+  a refusal whose audit write fails is 500, not the original refusal code;
+  `TestPreAuthRefusalsDoNotEmit` — 401 and 403 emit nothing, the documented
+  transport-layer omission).
 
 ---
 
