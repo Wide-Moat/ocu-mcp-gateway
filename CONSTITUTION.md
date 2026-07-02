@@ -52,6 +52,14 @@ validation closes it.
   `internal/profile/coverage_test.go` (`TestBaseValidatorStructural` — a
   tools/call with no params.name, an empty name, array arguments, or scalar params
   all fail; neutering the strict check goes RED).
+  The transport bound itself: `internal/ingress/bounded_read_test.go`
+  (`TestBoundedReadStopsAtTransportCap` — a self-audit found the cap fake-green:
+  deleting the `MaxBytesReader` line left the old 413 assertion GREEN because the
+  per-kind profile ceiling answers the SAME 413 — after buffering the whole body.
+  The test counts the bytes the handler consumes from the wire (must stop at
+  cap+ε) and asserts the refusal carries the TRANSPORT reason class
+  ("request body too large"), not the ceiling's ("payload_over_size_bound");
+  deleting the MaxBytesReader line goes RED on both prongs).
 
 ## II. Identity from the transport, never the body (NFR-SEC-09)
 
