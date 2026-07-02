@@ -4,7 +4,6 @@
 package auth
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -101,7 +100,7 @@ var astFset *token.FileSet
 
 func pos(t *testing.T, n ast.Node) string {
 	t.Helper()
-	return fmt.Sprintf("%s", astFset.Position(n.Pos()))
+	return astFset.Position(n.Pos()).String()
 }
 
 // recvNames renders the receiver's base type name (star-stripped).
