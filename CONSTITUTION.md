@@ -52,6 +52,14 @@ validation closes it.
   `internal/profile/coverage_test.go` (`TestBaseValidatorStructural` — a
   tools/call with no params.name, an empty name, array arguments, or scalar params
   all fail; neutering the strict check goes RED).
+  The transport bound itself: `internal/ingress/bounded_read_test.go`
+  (`TestBoundedReadStopsAtTransportCap` — a self-audit found the cap fake-green:
+  deleting the `MaxBytesReader` line left the old 413 assertion GREEN because the
+  per-kind profile ceiling answers the SAME 413 — after buffering the whole body.
+  The test counts the bytes the handler consumes from the wire (must stop at
+  cap+ε) and asserts the refusal carries the TRANSPORT reason class
+  ("request body too large"), not the ceiling's ("payload_over_size_bound");
+  deleting the MaxBytesReader line goes RED on both prongs).
 
 ## II. Identity from the transport, never the body (NFR-SEC-09)
 
@@ -126,6 +134,24 @@ holds no session state); session affinity returns with P3.
   — fail-closed admission; `TestCreateCarriesNoCredentialField` — the mapped
   create carries no credential-named field; `TestRouteDestroyAreFailClosedStubs` —
   the P1 Route/Destroy stubs refuse rather than fabricate).
+  The SHIPPED wiring (a self-audit found the composition root calling a legacy
+  endpoint-only constructor AROUND these guards — the guarded path existed,
+  production did not walk it): the legacy `NewControlForwarder` was REMOVED, so
+  `NewControlForwarderWithDial` is the only construction path, and
+  `cmd/ocu-mcp-gatewayd/wiring_test.go` pins the composition root
+  (`TestShippedForwarderWiringUsesGuardedConstructor` — an AST scan of package
+  main admits only the guarded constructor, so re-adding a bypass call goes RED;
+  `TestServeRequiresServiceCredentialFile` / `TestServeRequiresProvisioningPolicy`
+  / `TestServeRefusesEndpointWithoutMTLS` — the daemon refuses to BOOT, before any
+  listener binds, on a configuration that cannot walk the guarded path). The
+  material the guarded path consumes: `internal/forward/credential_test.go` (the
+  file-backed Generic internal token fails closed at construction and per
+  presentation, and re-reads the file so rotation needs no restart),
+  `internal/forward/mtls_load_test.go` (partial or unparsable mTLS material is
+  refused; the TLS-1.3 floor is pinned), and
+  `internal/config/provisioning_test.go` (closed workload-trust-profile
+  vocabulary — never defaulted; unknown-field smuggle guard; admissibility stays
+  with the constructor as the single validation source).
 
 ## IV. No gateway route to the operator surface — code AND network (NFR-SEC-52)
 
@@ -245,8 +271,13 @@ secret.
 
 - **Enforcement:** `internal/auth/skkey_test.go` (the real salted-SHA-256 path:
   `TestStaticKeySetResolvesActiveKey`, `…RejectsWrongSecret`, `…RejectsRevoked`,
-  `…RejectsExpired`, `…RejectsForeignDeploymentRecord`, and the code-fact
-  `TestResolveUsesConstantTimeCompare`); the schema gate `internal/keyset/`
+  `…RejectsExpired`, `…RejectsForeignDeploymentRecord`) and the constant-time pin
+  `internal/auth/constant_time_ast_test.go` (`TestResolveUsesConstantTimeCompare`
+  — an AST inspection of Resolve's BODY, replacing a grep-mechanics version a
+  self-audit proved vacuous: it requires a subtle.ConstantTimeCompare CALL inside
+  Resolve, and forbids bytes.Equal, any ==/!= over a call or indexed value, and
+  any `break` in the record loop, so a non-constant-time rewrite with a dead
+  token reference goes RED); the schema gate `internal/keyset/`
   (`TestSchemaRejects` — empty-set / non-active / malformed-hash / extra-field all
   refused); the boot-set loader `internal/config/loader_test.go`
   (`TestFileLoaderForeignDeploymentBootRejects`, `…EmptyDeploymentFailsClosed`,

@@ -43,8 +43,10 @@ type ControlForwarder struct {
 
 	// tlsConfig is the hardened (TLS 1.3-floored) mTLS transport the live dial
 	// uses, validated and stored at construction. cred is the gateway's service
-	// credential presented on the forward. Both are nil on the legacy stub path
-	// (endpoint-only construction).
+	// credential presented on the forward. NewControlForwarderWithDial is the
+	// ONLY constructor (the legacy endpoint-only constructor was removed — it
+	// let a composition root boot an endpoint without the mTLS/credential
+	// guards, §III), so tlsConfig is nil ONLY when no endpoint is configured.
 	tlsConfig *tls.Config
 	cred      ServiceCredential
 
@@ -54,18 +56,6 @@ type ControlForwarder struct {
 	// NEVER derived from a caller body (F5 ruling A) — a caller cannot provision.
 	// Zero on the legacy stub path.
 	provisioning ProvisioningPolicy
-}
-
-// NewControlForwarder builds the forwarder with the gateway service identity and
-// the Control endpoint (the legacy/stub path, no live transport). An empty
-// identity name is a construction error: a forward MUST present a service
-// principal. An empty endpoint is permitted (the scaffold may boot without a live
-// Control), but every Forward then fails closed.
-func NewControlForwarder(identity ServiceIdentity, endpoint string) (*ControlForwarder, error) {
-	if identity.Name == "" {
-		return nil, fmt.Errorf("forward: NewControlForwarder requires a non-empty service identity (fail-closed)")
-	}
-	return &ControlForwarder{identity: identity, endpoint: endpoint}, nil
 }
 
 // NewControlForwarderWithDial builds the forwarder with the P1 transport seams:
@@ -153,9 +143,12 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 			ErrForwardFailed, f.endpoint, f.cred.Principal(), create.WorkloadTrustProfile)
 	}
 
-	// Legacy stub path (endpoint configured without dial seams): fail closed.
+	// Defensive fail-closed: an endpoint with no hardened transport. Unreachable
+	// through the guarded constructor (a non-empty endpoint REQUIRES mTLS at
+	// construction, NFR-SEC-37); kept so a future construction path that skips
+	// the guard still refuses rather than dialing unencrypted.
 	_ = req
-	return SessionResponse{}, fmt.Errorf("%w: Control transport not yet wired (endpoint %q)", ErrForwardFailed, f.endpoint)
+	return SessionResponse{}, fmt.Errorf("%w: no hardened mTLS transport for endpoint %q (fail-closed)", ErrForwardFailed, f.endpoint)
 }
 
 // Identity returns the gateway service identity this forwarder presents. It is

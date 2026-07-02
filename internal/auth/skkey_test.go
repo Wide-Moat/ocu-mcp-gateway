@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"os"
-	"strings"
 	"testing"
 	"time"
 )
@@ -166,37 +164,8 @@ func TestStaticKeySetRejectsForeignDeploymentRecord(t *testing.T) {
 	}
 }
 
-// TestResolveUsesConstantTimeCompare is a code-fact guard: the resolver compares
-// the presented hash against the stored hash with crypto/subtle.ConstantTimeCompare,
-// NOT a plain `==` / bytes.Equal that would leak a timing oracle. It scans this
-// package's source for the ConstantTimeCompare call so a refactor to a non-constant
-// comparison is caught (NFR-SEC-87, ADR-0027).
-func TestResolveUsesConstantTimeCompare(t *testing.T) {
-	src, err := readPackageSource("skkey.go")
-	if err != nil {
-		t.Fatalf("read skkey.go: %v", err)
-	}
-	if !containsToken(src, "subtle.ConstantTimeCompare") {
-		t.Error("skkey.go must compare key hashes with subtle.ConstantTimeCompare (no timing oracle); the call was not found")
-	}
-	// And it must NOT fall back to bytes.Equal for the hash comparison.
-	if containsToken(src, "bytes.Equal(want") || containsToken(src, "want) == string(got") {
-		t.Error("skkey.go must not compare key hashes with a non-constant-time equality")
-	}
-}
-
-// readPackageSource reads a source file from this package's directory for a
-// code-fact scan. The test binary runs in the package dir, so the file is
-// alongside it.
-func readPackageSource(name string) (string, error) {
-	b, err := os.ReadFile(name)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
-// containsToken reports whether src contains the literal token.
-func containsToken(src, token string) bool {
-	return strings.Contains(src, token)
-}
+// The constant-time pin lives in constant_time_ast_test.go
+// (TestResolveUsesConstantTimeCompare): a self-audit found the previous
+// grep-mechanics version here vacuous — a non-constant-time Resolve with a dead
+// token reference passed it — so it was replaced with an AST inspection of
+// Resolve's body.
