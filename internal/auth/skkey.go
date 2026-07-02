@@ -134,7 +134,15 @@ func (s *staticKeySet) Resolve(bearer string) (Caller, error) {
 			// rather than treating a decode error as a match.
 			continue
 		}
-		got := hashBearer(rec.Salt, bearer)
+		got, gerr := hashBearer(rec.Salt, bearer)
+		if gerr != nil {
+			// A record whose salt does not decode never authenticates (it would
+			// be an unsalted hash — pass-the-hash). Skip it fail-closed, like the
+			// malformed stored hash above; salt validity is an at-rest record
+			// attribute, not secret-dependent, so the skip leaks no timing about
+			// the bearer.
+			continue
+		}
 		// Constant-time compare. The match is ANDed with the (public) prefix
 		// flag so a prefixless bearer can never be accepted even on the
 		// astronomically-unlikely hash coincidence — without a secret-dependent
@@ -160,14 +168,20 @@ func (s *staticKeySet) Resolve(bearer string) (Caller, error) {
 // hashBearer computes sha256(salt‖secret) for a presented bearer, returning the
 // raw digest bytes. The salt is the record's hex-encoded per-key salt; it is
 // decoded and prepended to the bearer bytes before hashing. A salt that fails to
-// decode hashes against empty salt, which will simply never match a correctly
-// salted stored hash (fail-closed), so a corrupt salt cannot create a match.
-func hashBearer(saltHex, bearer string) []byte {
-	salt, _ := hex.DecodeString(saltHex)
+// decode is an ERROR, never a silent partial-salt hash: a self-audit showed the
+// old ignore-the-error path was mirrored by the producer (HashForRecord), so a
+// corrupt salt round-tripped into an effectively UNSALTED sha256(secret) that
+// authenticated — the pass-the-hash weakness the salt exists to prevent
+// (GHSA-69x8-hrgq-fjj8). Fail-closed on both sides instead.
+func hashBearer(saltHex, bearer string) ([]byte, error) {
+	salt, err := hex.DecodeString(saltHex)
+	if err != nil {
+		return nil, fmt.Errorf("auth: salt is not decodable hex (fail-closed, never hashed unsalted): %w", err)
+	}
 	h := sha256.New()
 	h.Write(salt)
 	h.Write([]byte(bearer))
-	return h.Sum(nil)
+	return h.Sum(nil), nil
 }
 
 // HashForRecord computes the at-rest hex hash for a (salt, secret) pair, the
@@ -179,7 +193,13 @@ func HashForRecord(saltHex, secret string) (string, error) {
 	if !strings.HasPrefix(secret, KeyPrefix) {
 		return "", fmt.Errorf("auth: secret must carry the %q prefix", KeyPrefix)
 	}
-	return hex.EncodeToString(hashBearer(saltHex, secret)), nil
+	digest, err := hashBearer(saltHex, secret)
+	if err != nil {
+		// Refuse to mint a record hash over a corrupt salt — the producer half
+		// of the fail-closed pair (the verifier half is Resolve's skip).
+		return "", err
+	}
+	return hex.EncodeToString(digest), nil
 }
 
 // staticAuthenticator is the minimal-shelf CallerAuthenticator: it validates the
