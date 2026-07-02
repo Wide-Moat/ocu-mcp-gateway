@@ -57,13 +57,22 @@ decision (ADR-0027, gated on PR #311 to the architecture canon):
 go build ./...
 go test ./...
 
-# Run the daemon (requires the Control-owned boot-set; fails closed without it).
+# Run the daemon (requires the Control-owned boot-set, the deployment scope, the
+# gateway's own F5 service credential, and the deployment provisioning policy;
+# fails closed without any of them). A configured -control-url additionally
+# requires the mTLS-1.3 client material (NFR-SEC-37).
 go build -o ocu-mcp-gatewayd ./cmd/ocu-mcp-gatewayd
 ./ocu-mcp-gatewayd \
   -listen 127.0.0.1:8080 \
   -boot-set /etc/ocu/mcp-keys/boot-set.json \
+  -deployment ocu-dev \
   -service-identity ocu-mcp-gateway \
-  -control-url https://ocu-control:8443
+  -service-credential-file /etc/ocu/service-credential/token \
+  -provisioning-policy /etc/ocu/provisioning/policy.json \
+  -control-url https://ocu-control:8443 \
+  -control-ca /etc/ocu/f5-mtls/ca.pem \
+  -control-client-cert /etc/ocu/f5-mtls/client.pem \
+  -control-client-key /etc/ocu/f5-mtls/client-key.pem
 ```
 
 ## Canon

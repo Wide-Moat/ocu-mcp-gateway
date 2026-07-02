@@ -6,8 +6,10 @@ package forward
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 )
 
 // The F5 token taxonomy (02-trust-boundaries §8, component-01:39). The gateway
@@ -73,6 +75,39 @@ func minTLS13(base *tls.Config) *tls.Config {
 // service credential to present on the forward. A forward without the gateway's
 // own service principal is refused, never sent anonymously (NFR-SEC-26).
 var ErrNoServiceCredential = errors.New("forward: no gateway service credential available (fail-closed)")
+
+// LoadMTLSConfig loads the F5 mTLS client material from the three PEM files the
+// deployment mounts (the minimal shelf's auto-generated self-signed CA substrate;
+// the full shelf mounts customer-CA-rooted material behind the same three paths):
+// the CA bundle that verifies Control's server certificate, and the client
+// cert/key pair the gateway PRESENTS (the "m" in mTLS). All three are required —
+// a CA without a client pair is server-auth-only TLS, and a client pair without
+// the CA cannot verify Control (a self-signed CA is in no system pool) — so
+// partial material is refused, fail-closed, at load. The minimum version is
+// pinned to TLS 1.3 (the NFR-SEC-37 floor; hardenDialConfig re-asserts it at
+// construction, so the floor holds even if this loader is bypassed).
+func LoadMTLSConfig(caPath, certPath, keyPath string) (*tls.Config, error) {
+	if caPath == "" || certPath == "" || keyPath == "" {
+		return nil, fmt.Errorf("forward: mTLS material requires ca, client cert and client key paths — partial material is refused (NFR-SEC-37, fail-closed)")
+	}
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("forward: read mTLS CA %q: %w", caPath, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("forward: mTLS CA %q holds no parsable certificate (fail-closed)", caPath)
+	}
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("forward: load mTLS client pair (%q, %q): %w", certPath, keyPath, err)
+	}
+	return &tls.Config{
+		RootCAs:      pool,
+		Certificates: []tls.Certificate{pair},
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
 
 // hardenDialConfig enforces the transport invariants before a live dial: a
 // non-empty endpoint REQUIRES an mTLS config (NFR-SEC-37), and the TLS minimum is

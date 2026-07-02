@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -67,6 +68,17 @@ type options struct {
 	serializeDepth  int
 	deployment      string
 	refreshInterval time.Duration
+
+	// F5 guarded-construction knobs (§III): the gateway's own service credential,
+	// the deployment provisioning policy, and the mTLS-1.3 client material for the
+	// Control dial. The credential and the policy are ALWAYS required (the guarded
+	// constructor refuses a nil credential and an inadmissible policy); the mTLS
+	// triple is required whenever -control-url is set (NFR-SEC-37).
+	serviceCredentialFile string
+	provisioningPolicy    string
+	controlCA             string
+	controlClientCert     string
+	controlClientKey      string
 }
 
 // originList is a repeatable string flag collecting allowed Origin values for the
@@ -91,6 +103,11 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.deployment, "deployment", "", "this gateway's deployment scope (REQUIRED; the boot-set must be homogeneous and equal to it — a foreign-deployment record boot-rejects the whole set, ADR-0027)")
 	fs.DurationVar(&o.refreshInterval, "boot-set-refresh", 2*time.Minute, "boot-set re-load interval; a revoked key stops authenticating within this window (must be < the NFR-SEC-04 5-min floor)")
 	fs.StringVar(&o.controlURL, "control-url", "", "Control/operator API base URL (F5 forward target)")
+	fs.StringVar(&o.serviceCredentialFile, "service-credential-file", "", "path to the gateway's host-side service credential file (the Generic internal token presented on F5, NFR-SEC-26; REQUIRED — a forward is never sent anonymously)")
+	fs.StringVar(&o.provisioningPolicy, "provisioning-policy", "", "path to the deployment provisioning-policy JSON (workload trust profile, mount intent, egress policy, resource caps — F5 session provisioning comes strictly from deployment config, CONSTITUTION §III; REQUIRED)")
+	fs.StringVar(&o.controlCA, "control-ca", "", "path to the CA bundle verifying Control on the F5 mTLS-1.3 leg (required with -control-url, NFR-SEC-37)")
+	fs.StringVar(&o.controlClientCert, "control-client-cert", "", "path to the gateway's F5 mTLS client certificate (required with -control-url)")
+	fs.StringVar(&o.controlClientKey, "control-client-key", "", "path to the gateway's F5 mTLS client key (required with -control-url)")
 	fs.IntVar(&o.connCeiling, "conn-ceiling", 64, "max concurrent in-flight requests per audience-validated caller (NFR-SEC-53)")
 	fs.Var(&o.allowedOrigins, "allowed-origin", "allowed browser Origin for the DNS-rebinding guard (repeatable); originless callers are always allowed")
 	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in); empty fails closed on emit")
@@ -140,6 +157,19 @@ func serve(ctx context.Context, o options) error {
 	if o.refreshInterval <= 0 || o.refreshInterval >= revocationFloor {
 		return fmt.Errorf("serve: -boot-set-refresh must be > 0 and < %s (the NFR-SEC-04 revocation floor); got %s", revocationFloor, o.refreshInterval)
 	}
+	// F5 guarded-construction knobs (§III), validated up front so a misconfigured
+	// forward refuses at BOOT with the missing knob named, before any file I/O and
+	// long before a listener could bind. The guarded constructor re-checks all of
+	// this — these are the operator-friendly early messages, not the enforcement.
+	if o.serviceCredentialFile == "" {
+		return errors.New("serve: -service-credential-file is required (the gateway presents its OWN service credential on F5 — a forward is never sent anonymously, NFR-SEC-26; fail-closed)")
+	}
+	if o.provisioningPolicy == "" {
+		return errors.New("serve: -provisioning-policy is required (F5 session provisioning comes STRICTLY from deployment config, never a caller body — CONSTITUTION §III; fail-closed)")
+	}
+	if o.controlURL != "" && (o.controlCA == "" || o.controlClientCert == "" || o.controlClientKey == "") {
+		return errors.New("serve: -control-url requires the mTLS material (-control-ca, -control-client-cert, -control-client-key) — the F5 leg is mTLS-1.3 only (NFR-SEC-37); fail-closed")
+	}
 
 	// Build the boot-set loader and run the load-before-bind sequencer. The
 	// listener is bound ONLY after Load succeeds (invariant #9): an unreadable,
@@ -176,8 +206,35 @@ func serve(ctx context.Context, o options) error {
 		return fmt.Errorf("serve: build validator: %w", err)
 	}
 
-	// Build the F5 forwarder under the gateway's own service identity.
-	forwarder, err := forward.NewControlForwarder(forward.ServiceIdentity{Name: o.identity}, o.controlURL)
+	// Build the F5 forwarder through the GUARDED constructor (§III) — the shipped
+	// daemon walks the same path the dial guards live on, never around them:
+	// the gateway's own service credential (fail-closed at construction if the
+	// file is unreadable/empty — NFR-SEC-26), the deployment ProvisioningPolicy
+	// (admissibility re-checked by the constructor — ruling A), and the mTLS-1.3
+	// dial material whenever a Control endpoint is configured (endpoint without
+	// mTLS is a construction refusal — NFR-SEC-37). With no -control-url the
+	// forwarder boots without a transport and every Forward fails closed.
+	cred, err := forward.NewFileServiceCredential(o.serviceCredentialFile, o.identity)
+	if err != nil {
+		return fmt.Errorf("serve: build service credential: %w", err)
+	}
+	provisioning, err := config.LoadProvisioningPolicy(o.provisioningPolicy)
+	if err != nil {
+		return fmt.Errorf("serve: load provisioning policy: %w", err)
+	}
+	var dialTLS *tls.Config
+	if o.controlURL != "" {
+		dialTLS, err = forward.LoadMTLSConfig(o.controlCA, o.controlClientCert, o.controlClientKey)
+		if err != nil {
+			return fmt.Errorf("serve: load F5 mTLS material: %w", err)
+		}
+	}
+	forwarder, err := forward.NewControlForwarderWithDial(
+		forward.ServiceIdentity{Name: o.identity},
+		forward.DialConfig{Endpoint: o.controlURL, TLS: dialTLS},
+		cred,
+		provisioning,
+	)
 	if err != nil {
 		return fmt.Errorf("serve: build forwarder: %w", err)
 	}

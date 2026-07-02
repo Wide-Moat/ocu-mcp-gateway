@@ -126,6 +126,24 @@ holds no session state); session affinity returns with P3.
   — fail-closed admission; `TestCreateCarriesNoCredentialField` — the mapped
   create carries no credential-named field; `TestRouteDestroyAreFailClosedStubs` —
   the P1 Route/Destroy stubs refuse rather than fabricate).
+  The SHIPPED wiring (a self-audit found the composition root calling a legacy
+  endpoint-only constructor AROUND these guards — the guarded path existed,
+  production did not walk it): the legacy `NewControlForwarder` was REMOVED, so
+  `NewControlForwarderWithDial` is the only construction path, and
+  `cmd/ocu-mcp-gatewayd/wiring_test.go` pins the composition root
+  (`TestShippedForwarderWiringUsesGuardedConstructor` — an AST scan of package
+  main admits only the guarded constructor, so re-adding a bypass call goes RED;
+  `TestServeRequiresServiceCredentialFile` / `TestServeRequiresProvisioningPolicy`
+  / `TestServeRefusesEndpointWithoutMTLS` — the daemon refuses to BOOT, before any
+  listener binds, on a configuration that cannot walk the guarded path). The
+  material the guarded path consumes: `internal/forward/credential_test.go` (the
+  file-backed Generic internal token fails closed at construction and per
+  presentation, and re-reads the file so rotation needs no restart),
+  `internal/forward/mtls_load_test.go` (partial or unparsable mTLS material is
+  refused; the TLS-1.3 floor is pinned), and
+  `internal/config/provisioning_test.go` (closed workload-trust-profile
+  vocabulary — never defaulted; unknown-field smuggle guard; admissibility stays
+  with the constructor as the single validation source).
 
 ## IV. No gateway route to the operator surface — code AND network (NFR-SEC-52)
 

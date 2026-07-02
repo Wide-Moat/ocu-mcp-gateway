@@ -16,8 +16,20 @@ services:
     command:
       - -listen=0.0.0.0:8080
       - -boot-set=/etc/ocu/mcp-keys/boot-set.json
+      # The deployment scope; the mounted boot-set must be homogeneous and equal
+      # to it (a foreign-deployment record boot-rejects the whole set, ADR-0027).
+      - -deployment=ocu-dev
       - -service-identity=ocu-mcp-gateway
+      # F5 guarded construction (§III): the gateway's own service credential and
+      # the deployment provisioning policy are always required; a configured
+      # -control-url additionally requires the mTLS-1.3 client material
+      # (NFR-SEC-37 — endpoint-without-mTLS refuses at boot).
+      - -service-credential-file=/etc/ocu/service-credential/token
+      - -provisioning-policy=/etc/ocu/provisioning/policy.json
       - -control-url=https://ocu-control:8443
+      - -control-ca=/etc/ocu/f5-mtls/ca.pem
+      - -control-client-cert=/etc/ocu/f5-mtls/client.pem
+      - -control-client-key=/etc/ocu/f5-mtls/client-key.pem
       - -conn-ceiling=64
     volumes:
       # The Control-owned, root-owned hashed boot-set (salted SHA-256 only,
@@ -25,6 +37,26 @@ services:
       - type: bind
         source: ./mcp-keys
         target: /etc/ocu/mcp-keys
+        read_only: true
+      # The gateway's host-side F5 service credential (the Generic internal
+      # token, NFR-SEC-26). Root-owned, mounted read-only, rotated in place
+      # (the daemon re-reads it per presentation).
+      - type: bind
+        source: ./service-credential
+        target: /etc/ocu/service-credential
+        read_only: true
+      # The deployment provisioning policy (workload trust profile, mount
+      # intent, egress policy, resource caps — CONSTITUTION §III: provisioning
+      # comes strictly from deployment config, never a caller body).
+      - type: bind
+        source: ./provisioning
+        target: /etc/ocu/provisioning
+        read_only: true
+      # The F5 mTLS-1.3 client material (minimal shelf: the auto-generated
+      # self-signed CA substrate).
+      - type: bind
+        source: ./f5-mtls
+        target: /etc/ocu/f5-mtls
         read_only: true
     networks:
       # Agent-facing: inbound MCP tool-calls (F1).
