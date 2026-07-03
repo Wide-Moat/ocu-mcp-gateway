@@ -60,6 +60,16 @@ func NewSequencer(loader auth.KeySetLoader) (*Sequencer, error) {
 // ErrNotReady (wrapping the cause) and leaves readiness false, so the caller
 // aborts boot before binding any listener. It is the single transition from
 // not-ready to ready; the bind hook must run only after it returns nil.
+//
+// The "never bind against an EMPTY key set" property (see the KeySetLoader doc)
+// is enforced at the LOADER seam, not here: the minimal-shelf loader rejects a
+// zero-record set at boot (the vendored schema pins records minItems 1, plus a
+// belt-and-braces len==0 check in FileKeySetLoader.Load). The Sequencer gates
+// only on a loader error and a nil set — it deliberately does not re-check
+// emptiness, because a non-boot future load path may legitimately carry an empty
+// set that authenticates nobody (fail-closed) rather than failing to load. If a
+// future loader could return a non-nil empty set at boot, the empty-rejection
+// must stay at that loader, not move here.
 func (s *Sequencer) Load(ctx context.Context) error {
 	ks, err := s.loader.Load(ctx)
 	if err != nil {
