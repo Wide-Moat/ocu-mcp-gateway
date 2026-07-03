@@ -49,17 +49,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: trufflehog
-        uses: trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6
-        with:
-          path: ./
-          # Pin the SCANNER BINARY, not just the action SHA. The action's
-          # `version` input defaults to "latest", so a SHA-pinned composite still
-          # does `docker run ghcr.io/.../trufflehog:latest` — a fresh upstream
-          # image can change findings under a frozen action ref. The ghcr image
-          # tags carry NO `v` prefix (`3.95.5`, not `v3.95.5`).
-          version: 3.95.5
-          extra_args: --no-verification
+      # Pin the scanner IMAGE BY DIGEST, mirroring the gitleaks job's direct
+      # `docker run` (fleet SHA-pin discipline, #71). The trufflehog GitHub Action
+      # can only pin the image by TAG — it builds `trufflehog:${version}` — and a
+      # tag floats: firsthand, the `3.95.5` tag's image reports trufflehog_version
+      # 3.95.8 in its scan metadata, so the tag alone does not freeze the binary.
+      # A digest (@sha256:...) does. We run the pinned image directly and
+      # reproduce the action's own command (git scan of the full checked-out
+      # history, --fail so a finding reds the job, --no-verification so a detected
+      # secret blocks without a live network call).
+      - name: trufflehog (docker, digest-pinned)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            ghcr.io/trufflesecurity/trufflehog@sha256:56c25710275c4b8d74c4f1346a5e7c606fa7ff4afe996f680b288d0fae3fcd9c \
+            git file:///repo/ --fail --no-update --no-verification
 
   sast-semgrep:
     runs-on: ubuntu-latest
@@ -93,12 +96,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: trivy filesystem — CRITICAL blocks
+      - name: trivy filesystem — CRITICAL+HIGH blocks
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
-          severity: CRITICAL
+          # CRITICAL,HIGH — harmonised with the sibling webui/admin gates (fleet
+          # #64/#65): a HIGH supply-chain vuln (e.g. an access-restriction bypass)
+          # must block merge, not just a CRITICAL. A HIGH that is genuinely
+          # unexploitable in this component is tracked in .trivyignore with a CVE
+          # id, a justification, and a review date — never silenced blindly.
+          severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: "false"
 
