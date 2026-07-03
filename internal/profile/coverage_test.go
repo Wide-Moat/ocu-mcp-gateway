@@ -74,11 +74,12 @@ func TestKindString(t *testing.T) {
 
 func TestReasonString(t *testing.T) {
 	cases := map[Reason]string{
-		ReasonBaseSchema:    "base_schema_violation",
-		ReasonProfileSchema: "profile_constraint_violation",
-		ReasonOverSize:      "payload_over_size_bound",
-		ReasonBatching:      "batching_not_permitted",
-		ReasonUnknown:       "internal",
+		ReasonBaseSchema:     "base_schema_violation",
+		ReasonProfileSchema:  "profile_constraint_violation",
+		ReasonOverSize:       "payload_over_size_bound",
+		ReasonBatching:       "batching_not_permitted",
+		ReasonMethodNotFound: "method_not_found",
+		ReasonUnknown:        "internal",
 	}
 	for r, want := range cases {
 		if got := r.String(); got != want {

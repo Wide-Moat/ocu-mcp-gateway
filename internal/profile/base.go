@@ -61,8 +61,18 @@ func (jsonRPCBaseValidator) ValidateBase(kind Kind, raw []byte) error {
 		// validation: params.name MUST be a non-empty string and, if present,
 		// params.arguments MUST be a JSON object. tools/call is the main attack
 		// surface, so a malformed request is rejected here, never forwarded.
-		if _, ok := doc["method"]; !ok {
-			return errBaseMalformed
+		//
+		// The method NAME is checked against the inbound allowlist, not merely for
+		// presence: a self-audit found method-confusion — a request whose method was
+		// NOT tools/call (an invented evil/pwn, or a real-but-off-surface
+		// resources/list) rode this path and was forwarded on F5 as a tool-call. The
+		// legitimate inbound surface through this handler is exactly tools/call (the
+		// handshake is client-side; F5 carries only a ToolCall), so an off-allowlist
+		// method is refused here (mapped to JSON-RPC -32601 method-not-found), never
+		// forwarded. The allowlist is a named, extensible set so a future inbound
+		// method is a one-line add + its own validator + its own test.
+		if err := requireAllowedMethod(doc); err != nil {
+			return err
 		}
 		paramsRaw, ok := doc["params"]
 		if !ok {
@@ -138,6 +148,46 @@ func trimLeadingSpace(b []byte) []byte {
 	return b[i:]
 }
 
+// inboundMethodAllowlist is the exact set of JSON-RPC methods this gateway
+// handler accepts as an inbound request. It is exactly {"tools/call"}: the
+// handler does no method routing, the MCP handshake (initialize / capability
+// negotiation) is performed client-side and never reaches this handler, and the
+// F5 SessionRequest can carry only a ToolCall. It is a set (not a lone constant)
+// so a future inbound method is a one-line add here alongside its own validator
+// and test — and so deleting the guard reds TestMethodAllowlistIsExactlyToolsCall.
+var inboundMethodAllowlist = map[string]struct{}{
+	"tools/call": {},
+}
+
+// methodAllowed reports whether method is on the inbound allowlist. It is the
+// single source of truth for the accepted inbound surface; the guard and the
+// membership test both read it, so they cannot diverge.
+func methodAllowed(method string) bool {
+	_, ok := inboundMethodAllowlist[method]
+	return ok
+}
+
+// requireAllowedMethod fails closed when the request's "method" is missing or is
+// not on the inbound allowlist. An off-allowlist method returns errMethodNotFound
+// (mapped to JSON-RPC -32601), NOT errBaseMalformed, so a method-confusion attempt
+// is refused with "method not found" rather than mislabelled as a malformed body.
+func requireAllowedMethod(doc map[string]json.RawMessage) error {
+	raw, ok := doc["method"]
+	if !ok {
+		return errBaseMalformed
+	}
+	var method string
+	if err := json.Unmarshal(raw, &method); err != nil {
+		// method present but not a JSON string — a malformed request, not a
+		// well-formed off-allowlist method.
+		return errBaseMalformed
+	}
+	if !methodAllowed(method) {
+		return errMethodNotFound
+	}
+	return nil
+}
+
 // requireJSONRPCMarker fails if the message lacks "jsonrpc":"2.0".
 func requireJSONRPCMarker(doc map[string]json.RawMessage) error {
 	v, ok := doc["jsonrpc"]
@@ -158,3 +208,17 @@ var errBaseMalformed = &baseError{}
 type baseError struct{}
 
 func (*baseError) Error() string { return "profile: message failed MCP base-schema structural check" }
+
+// errMethodNotFound is the base-pass failure for a well-formed request whose
+// method is not on the inbound allowlist. The caller maps it to a
+// ReasonMethodNotFound deny (JSON-RPC -32601), distinct from errBaseMalformed, so
+// a method-confusion attempt is refused as "method not found" rather than
+// mislabelled as a malformed body. It carries no caller data (never the method
+// value).
+var errMethodNotFound = &methodNotFoundError{}
+
+type methodNotFoundError struct{}
+
+func (*methodNotFoundError) Error() string {
+	return "profile: request method is not on the inbound allowlist (method not found)"
+}
