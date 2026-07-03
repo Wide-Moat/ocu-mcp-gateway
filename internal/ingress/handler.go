@@ -168,7 +168,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// opt-in, never a caller body field. This runs AFTER the ceiling (which bounds
 	// total in-flight first) and AFTER validation (so the tool name for the
 	// parallel predicate comes from a validated body). The session key is the
-	// resolved caller's session hint (a HINT, NFR-SEC-43), never an authority. The
+	// RESOLVED caller's Tenant — the minimal-shelf session-scoping principal
+	// (NFR-SEC-43), read from the auth-resolved record, never from a caller body
+	// field. Keying on the resolved principal (not req.ToolCall.Name) is the
+	// load-bearing property pinned by TestSerializeKeyedOnPrincipalNotToolName. The
 	// slot is held across forward + emit (settled state) so call N+1 of a session
 	// cannot overtake the durable record of call N — the per-session history is
 	// strictly executed → recorded → next. A session queue at its bound is refused

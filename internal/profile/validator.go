@@ -6,6 +6,7 @@ package profile
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -147,7 +148,13 @@ func (v *Validator) Validate(kind Kind, raw []byte) error {
 	}
 
 	// Pass 1 — MCP base schema (structural conformance; OCU does not restate it).
+	// An off-allowlist method surfaces as ReasonMethodNotFound (-32601), distinct
+	// from a malformed-body base-schema violation, so a method-confusion attempt is
+	// refused as "method not found" rather than mislabelled.
 	if err := v.base.ValidateBase(kind, raw); err != nil {
+		if errors.Is(err, errMethodNotFound) {
+			return &Deny{Kind: kind, Reason: ReasonMethodNotFound}
+		}
 		return &Deny{Kind: kind, Reason: ReasonBaseSchema}
 	}
 

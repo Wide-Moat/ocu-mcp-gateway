@@ -154,6 +154,10 @@ const (
 	// ReasonBatching: an HTTP body that is a JSON array (batching removed in
 	// 2025-06-18; jsonRpcSingleMessage requires a single object).
 	ReasonBatching
+	// ReasonMethodNotFound: a well-formed request whose JSON-RPC method is not on
+	// the inbound allowlist (the surface is exactly tools/call). Maps to -32601
+	// "method not found", distinct from a malformed-body base-schema violation.
+	ReasonMethodNotFound
 )
 
 // String renders a Reason as a stable reason class string for diagnostics. It is
@@ -168,6 +172,8 @@ func (r Reason) String() string {
 		return "payload_over_size_bound"
 	case ReasonBatching:
 		return "batching_not_permitted"
+	case ReasonMethodNotFound:
+		return "method_not_found"
 	default:
 		return "internal"
 	}

@@ -67,6 +67,11 @@ func writeProfileDeny(w http.ResponseWriter, err error) {
 		writeRPCError(w, http.StatusBadRequest, rpcInvalidRequest, d.Reason.String())
 	case profile.ReasonOverSize:
 		writeRPCError(w, http.StatusRequestEntityTooLarge, rpcInvalidParams, d.Reason.String())
+	case profile.ReasonMethodNotFound:
+		// An off-allowlist inbound method is "method not found" (-32601), not a
+		// malformed body: the surface is exactly tools/call, and a request naming
+		// any other method is refused here, never forwarded (method-confusion guard).
+		writeRPCError(w, http.StatusBadRequest, rpcMethodNotAllowed, d.Reason.String())
 	case profile.ReasonBaseSchema, profile.ReasonProfileSchema:
 		writeRPCError(w, http.StatusBadRequest, rpcInvalidParams, d.Reason.String())
 	default:

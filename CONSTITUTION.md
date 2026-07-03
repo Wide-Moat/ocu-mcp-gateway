@@ -43,6 +43,18 @@ string and `params.arguments`, if present, MUST be a JSON object (never a scalar
 or array). A weakly-validated request is the gap CodeRabbit surfaced; strict
 validation closes it.
 
+The inbound JSON-RPC **method** is checked against an explicit allowlist, not
+merely for presence. A self-audit found method-confusion: the base pass checked
+only that the `method` key existed, never its value, so a request whose method
+was NOT `tools/call` (an invented `evil/pwn`, or a real-but-off-surface
+`resources/list`) rode the tools/call path and was forwarded on F5 as a
+tool-call. The legitimate inbound surface through this handler is exactly
+`tools/call` (the handler does no method routing; the MCP handshake is
+client-side; the F5 `SessionRequest` can carry only a `ToolCall`), so an
+off-allowlist method is refused with JSON-RPC `-32601` "method not found" and
+forwarded nowhere. The allowlist is a named, extensible set so a future inbound
+method is a one-line add plus its own validator and test, never a rewrite.
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant1_ValidateBeforeForward` — an invalid body is denied and the
   recording forwarder is never called),
@@ -52,6 +64,14 @@ validation closes it.
   `internal/profile/coverage_test.go` (`TestBaseValidatorStructural` — a
   tools/call with no params.name, an empty name, array arguments, or scalar params
   all fail; neutering the strict check goes RED).
+  The inbound method allowlist: `internal/profile/base_method_allowlist_test.go`
+  (`TestBaseRejectsNonToolsCallMethod`, `TestBaseAdmitsToolsCallMethod`,
+  `TestMethodAllowlistIsExactlyToolsCall`) and, at the shipped boundary,
+  `internal/ingress/method_allowlist_test.go` (`TestUnknownMethodNotForwarded` —
+  a non-tools/call method is denied -32601 and the recording forwarder is never
+  called; `TestToolsCallStillForwards` — the one legitimate method still
+  forwards). Two-sided: replacing the allowlist guard with the old
+  presence-only check, or making the allowlist fail-open, reds a named test.
   The transport bound itself: `internal/ingress/bounded_read_test.go`
   (`TestBoundedReadStopsAtTransportCap` — a self-audit found the cap fake-green:
   deleting the `MaxBytesReader` line left the old 413 assertion GREEN because the
