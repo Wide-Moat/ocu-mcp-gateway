@@ -147,9 +147,13 @@ func TestCreateCarriesNoCredentialField(t *testing.T) {
 	}
 }
 
-// TestRouteDestroyAreFailClosedStubs — Route and Destroy are P1 fail-closed seam
-// stubs (the gateway is stateless); both refuse rather than fabricating a result.
-func TestRouteDestroyAreFailClosedStubs(t *testing.T) {
+// TestRouteIsFailClosedStubUntilG2 — Route is a deliberate fail-closed seam stub:
+// the canon RouteResponse needs a per-session control_endpoint that Control does
+// not yet expose (it appears with the G2 exec-driver). It refuses rather than
+// fabricating an endpoint or returning the wrong contract (status returns key/state,
+// not an endpoint). This stays RED-on-neuter: were Route to fabricate a
+// CreateResponse, this would fail.
+func TestRouteIsFailClosedStubUntilG2(t *testing.T) {
 	f, err := NewControlForwarderWithDial(
 		ServiceIdentity{Name: "gw"},
 		DialConfig{Endpoint: "https://control:8443", TLS: goodTLS()},
@@ -160,9 +164,27 @@ func TestRouteDestroyAreFailClosedStubs(t *testing.T) {
 		t.Fatalf("construct: %v", err)
 	}
 	if _, rerr := f.Route(context.Background(), CreateRequest{}); !errors.Is(rerr, ErrForwardFailed) {
-		t.Errorf("Route must be a fail-closed stub on P1, got %v", rerr)
+		t.Errorf("Route must be a fail-closed stub until the G2 exec-driver, got %v", rerr)
 	}
-	if derr := f.Destroy(context.Background(), "session-x"); !errors.Is(derr, ErrForwardFailed) {
-		t.Errorf("Destroy must be a fail-closed stub on P1, got %v", derr)
+}
+
+// TestDestroyFailsClosedWithoutTransport — Destroy is LIVE (POST
+// /v1alpha/sessions/destroy), so with no endpoint / no hardened transport it must
+// fail closed rather than pretend a teardown. The reachable-server success path is
+// covered by TestDestroyLiveRoundTrip; here we pin the fail-closed halves so the
+// live path cannot silently no-op when the transport is absent.
+func TestDestroyFailsClosedWithoutTransport(t *testing.T) {
+	// No endpoint: every Destroy fails closed.
+	noEndpoint, err := NewControlForwarderWithDial(
+		ServiceIdentity{Name: "gw"},
+		DialConfig{}, // no endpoint, no TLS
+		staticCred{token: "t", principal: "gw"},
+		validProvisioning(),
+	)
+	if err != nil {
+		t.Fatalf("construct no-endpoint: %v", err)
+	}
+	if derr := noEndpoint.Destroy(context.Background(), "session-x"); !errors.Is(derr, ErrForwardFailed) {
+		t.Errorf("Destroy with no endpoint must fail closed, got %v", derr)
 	}
 }
