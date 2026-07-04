@@ -109,14 +109,19 @@ on any path reaching the sandbox; the forward carries only the gateway's own
 service identity. This is a **type fact**: the forward shapes have no field that
 could carry the credential.
 
-The transport (P1 dial) presents the gateway's OWN service credential — the
+The transport (the F5 dial) presents the gateway's OWN service credential — the
 host-side service-to-service "Generic internal token" (component-01:39, §8) — over
 an mTLS-1.3 leg (NFR-SEC-37), never the caller's credential and never an operator
 scope (P1-S2). A forward with no service credential is refused, never sent
-anonymously (NFR-SEC-26). The session-request WIRE FIELDS are NOT invented in this
-repo: they are the frozen Control session-setup schema (`session_setup.proto`, PR
-#293), vendored byte-identical (see `VENDORED.md`) and hand-mapped into the seam
-(`internal/forward/session.go`).
+anonymously (NFR-SEC-26). The F5 wire is **HTTP/JSON over mTLS**, not gRPC: the
+Control gateway-ingress mounts a minimal JSON service surface (`POST
+/v1alpha/sessions[/destroy|/status]`, decoded with `DisallowUnknownFields`), and the
+gRPC surface named in 08-contracts §1 is a future follow-up Control itself declares.
+The FIELD SEMANTICS are NOT invented in this repo: they are the frozen Control
+session-setup schema (`session_setup.proto`, PR #293), vendored byte-identical (see
+`VENDORED.md`) and hand-mapped into the seam (`internal/forward/session.go`); the
+JSON wire projection is exactly the three fields Control's `createBody` decodes
+(`session_hint`, `image`, `control_pub_key`).
 
 The F5 create is **stateless create-per-forward** (architect ruling A). The
 session-provisioning fields (`workload_trust_profile`, `mount_intent`,
@@ -128,12 +133,19 @@ trust profile, or open egress). The only caller-influenced value is the
 non-secret principal handle. Custody holds as a type fact on both directions: the
 mapped shapes have no field for the minted Storage-JWT / filestore credential
 (`MountIntent` omits the auth token). The `image` ref is PIN-PENDING at the
-gatekeeper (`reserved 6`/`"image"`, #205 / issue #3) and is left UNSET, never
-invented nor silently dropped. The gRPC marshal + round-trip is the remaining
-wire-up, so the dial path fails closed AFTER building and validating an admissible
-create (fail-closed on an unspecified profile, an ill-formed mount scope, or an
-unset pids cap). `Route`/`Destroy` are fail-closed seam stubs on P1 (the gateway
-holds no session state); session affinity returns with P3.
+gatekeeper (`reserved 6`/`"image"`, #205 / issue #3) and is left UNSET on the wire
+(empty), never invented nor silently dropped; `control_pub_key` is likewise empty on
+a bare create (the Ed25519 key is staged for the exec channel Control drives — the G2
+exec-driver, ADR-0024). The create round-trip is LIVE: the dial builds and validates
+an admissible create (fail-closed on an unspecified profile, an ill-formed mount
+scope, or an unset pids cap), projects it to the JSON wire body, POSTs it over the
+hardened mTLS transport, and maps the reply — failing closed on a transport error or
+a non-2xx (never a fabricated success). `Destroy` is LIVE too (`POST
+/v1alpha/sessions/destroy`, the cooperative teardown, never the operator force-kill).
+`Route` is a deliberate fail-closed stub until Control exposes a per-session
+`control_endpoint` (the G2 exec-driver, NFR-IC-05); resolving it through `/status`
+would return the wrong contract (`{key,state}`, not an endpoint), so it refuses
+rather than fabricate.
 
 - **Enforcement:** `internal/forward/no_credential_test.go`
   (`TestForwardShapesCarryNoCredential` — a reflect pass over every forward shape
@@ -145,15 +157,27 @@ holds no session state); session affinity returns with P3.
   (`TestNewWithDialRequiresMTLSWhenEndpointSet` — a configured endpoint without
   mTLS fails NFR-SEC-37; `TestNewWithDialRequiresServiceCredential` — a nil
   service credential fails NFR-SEC-26; `TestDialForwardFailsClosedOnCredError` —
-  a credential error refuses the forward; `TestDialForwardPendingFrozenSchema` —
-  the dial path builds+validates the create then fails closed pending the gRPC
-  round-trip). The P1-live provisioning guard: `internal/forward/session_test.go`
+  a credential error refuses the forward; `TestDialForwardFailsClosedOnUnreachableControl`
+  — the dial path builds+validates the create then fails closed when Control is
+  unreachable, never a fabricated success). The provisioning guard:
+  `internal/forward/session_test.go`
   (`TestProvisioningComesFromPolicyNotBody` — provisioning comes from the
   deployment policy, not the caller body, so a caller cannot provision;
   `TestCreateRefusesUnspecifiedProfile` / `TestConstructorRefusesInadmissiblePolicy`
   — fail-closed admission; `TestCreateCarriesNoCredentialField` — the mapped
-  create carries no credential-named field; `TestRouteDestroyAreFailClosedStubs` —
-  the P1 Route/Destroy stubs refuse rather than fabricate).
+  create carries no credential-named field; `TestRouteIsFailClosedStubUntilG2` — the
+  Route stub refuses rather than fabricate a control_endpoint;
+  `TestDestroyFailsClosedWithoutTransport` — live Destroy fails closed with no
+  transport). The LIVE F5 round-trip: `internal/forward/roundtrip_test.go`
+  (`TestForwardLiveRoundTrip` — a create POSTs exactly `{session_hint, image,
+  control_pub_key}` over a verified mTLS handshake and maps the 201 `{key,state}`
+  reply into a `SessionResponse` correlation; `TestForwardDoesNotLeakCallerCredential`
+  — no caller `sk-ocu-` key rides F5 in header or body;
+  `TestForwardFailsClosedOnControlError` / `TestDestroyFailsClosedOnControlError` — a
+  non-2xx control reply is a fail-closed refusal, never a fabricated success;
+  `TestDestroyLiveRoundTrip` — the cooperative teardown POSTs
+  `/v1alpha/sessions/destroy`; both live paths go RED under a fabricate-success or
+  no-op keystone neuter).
   The SHIPPED wiring (a self-audit found the composition root calling a legacy
   endpoint-only constructor AROUND these guards — the guarded path existed,
   production did not walk it): the legacy `NewControlForwarder` was REMOVED, so

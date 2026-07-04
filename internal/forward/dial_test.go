@@ -110,14 +110,19 @@ func TestDialForwardFailsClosedOnCredError(t *testing.T) {
 	}
 }
 
-// TestDialForwardDoesNotInventFields proves the dial path does NOT fabricate the
-// session-request wire fields — it fails closed pending the frozen PR #293 schema
-// rather than sending an invented body. This guards against the fail-open class
-// of an invented cross-component contract.
-func TestDialForwardPendingFrozenSchema(t *testing.T) {
+// TestDialForwardFailsClosedOnUnreachableControl proves the live F5 round-trip
+// fails CLOSED when Control is unreachable: the credential is good, the mTLS config
+// is valid, and the create builds+validates — but the transport dial to an
+// unreachable endpoint is a refusal (ErrForwardFailed), never a fabricated success.
+// This is the successor to the old "round-trip pending" stub assertion: the wire is
+// now live (see TestForwardLiveRoundTrip for the reachable-server success), so the
+// remaining fail-closed guarantee is that a dead control refuses rather than pretends.
+func TestDialForwardFailsClosedOnUnreachableControl(t *testing.T) {
 	f, err := NewControlForwarderWithDial(
 		ServiceIdentity{Name: "gw"},
-		DialConfig{Endpoint: "https://control:8443", TLS: goodTLS()},
+		// A syntactically valid but unreachable endpoint: the dial fails at the
+		// transport, which must surface as a fail-closed ErrForwardFailed.
+		DialConfig{Endpoint: "https://127.0.0.1:1", TLS: goodTLS()},
 		staticCred{token: "tok", principal: "gw-principal"},
 		validProvisioning(),
 	)
@@ -125,11 +130,8 @@ func TestDialForwardPendingFrozenSchema(t *testing.T) {
 		t.Fatalf("construct: %v", err)
 	}
 	_, ferr := f.Forward(context.Background(), SessionRequest{Principal: auth.Caller{Tenant: "tenant-a"}})
-	// The credential is good, the mTLS is valid, and the create builds+validates —
-	// so the ONLY remaining gate is the gRPC round-trip. It must fail closed there,
-	// not pretend success.
 	if !errors.Is(ferr, ErrForwardFailed) {
-		t.Fatalf("the dial path must fail closed pending the gRPC round-trip, got %v", ferr)
+		t.Fatalf("an unreachable control must fail closed with ErrForwardFailed, got %v", ferr)
 	}
 }
 
