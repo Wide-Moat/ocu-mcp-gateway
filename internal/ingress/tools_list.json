@@ -1,0 +1,149 @@
+{
+  "tools": [
+    {
+      "name": "bash_tool",
+      "description": "Run a bash command in the container",
+      "inputSchema": {
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "description"
+        ],
+        "title": "bash_toolArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "str_replace",
+      "description": "Replace a string in a file",
+      "inputSchema": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "old_str": {
+            "title": "Old Str",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "new_str": {
+            "default": "",
+            "title": "New Str",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description",
+          "old_str",
+          "path"
+        ],
+        "title": "str_replaceArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "create_file",
+      "description": "Create a file with the given contents",
+      "inputSchema": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "file_text": {
+            "title": "File Text",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description",
+          "file_text",
+          "path"
+        ],
+        "title": "create_fileArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "view",
+      "description": "View the contents of a file or directory",
+      "inputSchema": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description",
+          "path"
+        ],
+        "title": "viewArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "sub_agent",
+      "description": "Delegate a task to a sub-agent",
+      "inputSchema": {
+        "properties": {
+          "task": {
+            "title": "Task",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "max_turns": {
+            "default": 0,
+            "title": "Max Turns",
+            "type": "integer"
+          },
+          "working_directory": {
+            "default": "/home/assistant",
+            "title": "Working Directory",
+            "type": "string"
+          },
+          "resume_session_id": {
+            "default": "",
+            "title": "Resume Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task",
+          "description"
+        ],
+        "title": "sub_agentArguments",
+        "type": "object"
+      }
+    }
+  ]
+}
