@@ -63,6 +63,15 @@ allowlist deny. The allowlist / handshake set is named and extensible: a new
 inbound method is a one-line add plus its own local-answer-or-forward decision and
 test, never a rewrite.
 
+A JSON-RPC **notification** — a message with no `id`, or a `notifications/*`
+method — is fire-and-forget and is acknowledged `202 Accepted` with an EMPTY body
+BEFORE the handshake/forward routing: it is never answered with a result or a
+`-32601` deny and never reaches the forwarder. This is the stateless
+streamable-HTTP transport the official SDK speaks (it sends
+`notifications/initialized` right after `initialize`); answering that notification
+with any body closed the SDK transport on the next request. Because a notification
+is dropped before the forward, it too cannot ride the F5 leg.
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant1_ValidateBeforeForward` — an invalid body is denied and the
   recording forwarder is never called),
@@ -83,9 +92,16 @@ test, never a rewrite.
   gateway-local 200 and the forwarder is NEVER called; removing the local routing
   reds it; `TestInitializeResultShape`, `TestToolsListReturnsToolArray` — the
   handshake responses are the shapes the SDK consumes; `TestOffSurfaceMethodStillDenied`
-  — growing the handshake did not open the allowlist to everything). Two-sided:
-  replacing the allowlist guard with the old presence-only check, making the
-  allowlist fail-open, or forwarding a handshake method reds a named test.
+  — growing the handshake did not open the allowlist to everything). The
+  notification 202 rule: `internal/ingress/streamable_test.go`
+  (`TestNotificationInitializedIsAccepted202` — the notification the SDK sends
+  post-initialize is 202 with an empty body and never forwarded; answering it
+  -32601 reds it and breaks the real SDK; `TestAnyNotificationIsAccepted202`,
+  `TestIdlessRequestIsNotification`, `TestIdBearingRequestsStillAnswered` — the
+  rule keys on the absence of an id, not on swallowing id-bearing requests).
+  Two-sided: replacing the allowlist guard with the old presence-only check, making
+  the allowlist fail-open, forwarding a handshake method, or answering a
+  notification with a body reds a named test.
   The transport bound itself: `internal/ingress/bounded_read_test.go`
   (`TestBoundedReadStopsAtTransportCap` — a self-audit found the cap fake-green:
   deleting the `MaxBytesReader` line left the old 413 assertion GREEN because the
