@@ -91,12 +91,47 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 	writeRPCError(w, http.StatusBadRequest, rpcParseError, "invalid request body")
 }
 
-// writeResult relays the forwarded result to the caller. Only the bounded result
-// payload and the stable correlation id reach the wire; the gateway has already
-// identifier-minimized the upstream response (no session id / container_name /
-// internal route) before it reaches here (invariant #5). The correlation id is a
-// stable handle, NOT a session id.
-func writeResult(w http.ResponseWriter, resp forward.SessionResponse) {
+// writeToolResult relays the forwarded CallToolResult to the caller, VALIDATED
+// OUTBOUND and framed into the JSON-RPC result envelope with the echoed request id.
+//
+//   - Outbound validation (invariant #5, NFR-SEC-51): resp.Result is the projected
+//     MCP CallToolResult from the exec hop. Before it reaches the caller it is
+//     validated against KindCallToolResult — a control/guest/projection bug that
+//     produced a malformed or oversized result is a FAIL-CLOSED 500, never a
+//     malformed body handed to the caller. This is the outbound counterpart of the
+//     inbound profile gate; the response path was previously unvalidated.
+//   - JSON-RPC framing: a validated result is wrapped {"jsonrpc":"2.0","id":<echoed>,
+//     "result":<CallToolResult>} so the SDK correlates the response to its request.
+//   - Create-only path: a forward with no exec projection (resp.Result empty — a
+//     non-bash tool, or a bare create) keeps the minimal {"jsonrpc":"2.0"} body with
+//     the correlation in the header (the prior stateless-create behaviour).
+//
+// The gateway has already identifier-minimized the upstream response before here;
+// the correlation id is a stable handle, NOT a session id.
+func (h *Handler) writeToolResult(w http.ResponseWriter, resp forward.SessionResponse, id json.RawMessage) {
+	// Create-only (no exec projection): preserve the minimal body + correlation
+	// header. Nothing to validate — there is no result payload.
+	if len(resp.Result) == 0 {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if resp.Correlation != "" {
+			w.Header().Set("MCP-Correlation-Id", resp.Correlation)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0"}`))
+		return
+	}
+
+	// Outbound validation: a result that is not a well-formed, bounded
+	// CallToolResult must never be relayed as a success (fail-closed, leak-free).
+	if err := h.validator.Validate(profile.KindCallToolResult, resp.Result); err != nil {
+		writeRPCError(w, http.StatusInternalServerError, rpcInternalError, "invalid upstream result")
+		return
+	}
+
+	// Frame the validated result into the JSON-RPC envelope with the echoed id,
+	// reusing the handshake path's rpcResultBody so the framing is identical across
+	// gateway-local and forwarded results. The result is already-valid JSON
+	// (RawMessage), carried verbatim.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if resp.Correlation != "" {
 		// A stable, leak-free correlation handle for the caller to reference; it
@@ -104,10 +139,9 @@ func writeResult(w http.ResponseWriter, resp forward.SessionResponse) {
 		w.Header().Set("MCP-Correlation-Id", resp.Correlation)
 	}
 	w.WriteHeader(http.StatusOK)
-	// resp.Result is the bounded, validated result payload to relay verbatim.
-	if len(resp.Result) > 0 {
-		_, _ = w.Write(resp.Result)
-		return
-	}
-	_, _ = w.Write([]byte(`{"jsonrpc":"2.0"}`))
+	_ = json.NewEncoder(w).Encode(rpcResultBody{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  json.RawMessage(resp.Result),
+	})
 }

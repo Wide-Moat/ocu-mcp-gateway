@@ -272,9 +272,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (7) Leak-free response — invariant #5. Only the bounded result + the stable
-	// correlation id reach the caller.
-	writeResult(w, resp)
+	// (7) Leak-free response — invariant #5. The forwarded CallToolResult is
+	// VALIDATED OUTBOUND (KindCallToolResult) before it reaches the caller and framed
+	// into the JSON-RPC result envelope with the ECHOED request id so the SDK
+	// correlates it. A result that fails outbound validation is a fail-closed refusal
+	// (a malformed/oversized body is never handed to the caller, NFR-SEC-51). Only
+	// the bounded result + the stable correlation id reach the wire.
+	h.writeToolResult(w, resp, idFrom(raw))
 }
 
 // recordRefusal durably records a TERMINATED, post-auth refusal (§XI, F11): a
@@ -404,9 +408,9 @@ func isNotification(raw []byte) bool {
 
 // toolCallFrom extracts the forwarded ToolCall from the validated raw body. The
 // body has already passed profile validation, so this is a structural read of a
-// known-good shape; it injects no credential (invariant #3). A future revision
-// wires the full JSON-RPC method/params decode; the scaffold forwards the
-// validated arguments verbatim.
+// known-good shape; it injects no credential (invariant #3). It also derives the
+// guest command Argv (the G2 exec-driver input) from the tool arguments, keeping
+// the command-parsing in ingress so the forward package holds the arguments opaque.
 func toolCallFrom(raw []byte) forward.ToolCall {
 	var msg struct {
 		Params struct {
@@ -418,5 +422,33 @@ func toolCallFrom(raw []byte) forward.ToolCall {
 	return forward.ToolCall{
 		Name:      msg.Params.Name,
 		Arguments: msg.Params.Arguments,
+		Argv:      argvFromToolCall(msg.Params.Name, msg.Params.Arguments),
 	}
+}
+
+// argvFromToolCall derives the guest command vector the exec hop runs from a
+// validated tool-call's name and arguments. The command-parsing lives HERE (not in
+// the forward package) so the forward keeps the arguments opaque (invariant #3):
+// the gateway translates the OCU tool surface into an argv exactly once, at the
+// ingress boundary. bash_tool {"command":"..."} runs the command under a login
+// shell (["bash","-lc",command]) — the same shape the upstream computer-use tool
+// uses. A tool with no exec projection (or a missing command) yields a nil Argv,
+// which the forward reads as "no exec hop" (the create-only path). It injects no
+// credential: the argv is the caller's own command, run under the provisioned
+// session, never an authority.
+func argvFromToolCall(name string, arguments json.RawMessage) []string {
+	if name != "bash_tool" {
+		// Only bash_tool has an exec-argv projection wired in this hop; the other
+		// OCU tools (str_replace, create_file, view, sub_agent) are file/agent
+		// operations the control/guest side interprets, not a shell argv the gateway
+		// synthesizes. They forward with no Argv (no gateway-side exec projection).
+		return nil
+	}
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil || args.Command == "" {
+		return nil
+	}
+	return []string{"bash", "-lc", args.Command}
 }

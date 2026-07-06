@@ -24,12 +24,15 @@ func TestMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestHappyPath200 covers the success path (writeResult) end-to-end through the
+// TestHappyPath200 covers the success path (writeToolResult) end-to-end through the
 // handler: auth → ceiling → validate → forward → 200 with the result relayed.
+// SessionResponse.Result is the CallToolResult PAYLOAD (the JSON-RPC result field
+// content), NOT a whole envelope — the gateway frames it into the
+// {"jsonrpc","id","result"} envelope and validates it outbound (KindCallToolResult).
 func TestHappyPath200(t *testing.T) {
 	fwd := &recordingForwarder{resp: forward.SessionResponse{
 		Correlation: "corr-123",
-		Result:      []byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`),
+		Result:      []byte(`{"content":[{"type":"text","text":"ok"}]}`),
 	}}
 	h := acceptingHandler(t, fwd, nil)
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-good", validToolCall)
@@ -44,7 +47,8 @@ func TestHappyPath200(t *testing.T) {
 	}
 }
 
-// TestHappyPath200EmptyResult covers writeResult's empty-result branch.
+// TestHappyPath200EmptyResult covers writeToolResult's empty-result branch (the
+// create-only path: a forward with no exec projection keeps the minimal body).
 func TestHappyPath200EmptyResult(t *testing.T) {
 	fwd := &recordingForwarder{resp: forward.SessionResponse{}}
 	h := acceptingHandler(t, fwd, nil)

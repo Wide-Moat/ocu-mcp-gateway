@@ -81,6 +81,14 @@ type ToolCall struct {
 	// bounded by maxToolArgumentsBytes. It is forwarded verbatim; the gateway
 	// injects no credential into it.
 	Arguments []byte
+	// Argv is the command vector the exec hop runs in the guest (G2 exec-driver).
+	// The ingress derives it from the validated tool arguments (e.g. a bash_tool
+	// {"command":"..."} becomes ["bash","-lc",command]) — the command-parsing stays
+	// in ingress so this package keeps the arguments opaque (invariant #3). It
+	// carries NO credential: the argv is the caller's command, run under the
+	// session the create hop already provisioned. An empty Argv means the tool has
+	// no exec projection (the create-only path); the exec hop is skipped.
+	Argv []string
 }
 
 // SessionResponse is what the Control/operator API returns on F5, relayed back

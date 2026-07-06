@@ -193,6 +193,44 @@ type ProvisioningPolicy struct {
 	EgressPolicy EgressPolicy
 	// ResourceCaps are the hard caps stamped on the runtime.
 	ResourceCaps ResourceCaps
+	// ExecTimeoutSeconds is the deployment-policy ceiling on a single exec (the G2
+	// exec-driver hop). Like ResourceCaps it is a DEPLOYMENT decision, never
+	// caller-controlled (F5 ruling A): a caller cannot set 0 (unbounded) or a huge
+	// value (a DoS vector). Zero here means "use the safe default"; the value the
+	// gateway sends is always clamped into [execTimeoutMinSeconds,
+	// execTimeoutMaxSeconds] so a misconfigured config cannot forward an
+	// out-of-range ceiling.
+	ExecTimeoutSeconds uint32
+}
+
+// execTimeout ceiling bounds. Control takes a raw uint32 timeout_s, so the gateway
+// never forwards a bare config value: a 0 (or unset) becomes the default, and any
+// value is clamped into [min,max] before it leaves. The default matches the guest
+// boot-child ready-timeout (a sane ceiling for an interactive step); long-running
+// commands are a separate concern, not this hop.
+const (
+	execTimeoutDefaultSeconds uint32 = 30
+	execTimeoutMinSeconds     uint32 = 1
+	execTimeoutMaxSeconds     uint32 = 300
+)
+
+// clampExecTimeout resolves the deployment ExecTimeoutSeconds into the value the
+// gateway forwards: an unset (0) config uses the default, and the result is clamped
+// into [min,max] so control never receives an out-of-range or unbounded ceiling
+// (NFR-SEC-46, bounded/ceiling). It is caller-independent — the input is deployment
+// config, never a caller body field.
+func clampExecTimeout(configured uint32) uint32 {
+	v := configured
+	if v == 0 {
+		v = execTimeoutDefaultSeconds
+	}
+	if v < execTimeoutMinSeconds {
+		return execTimeoutMinSeconds
+	}
+	if v > execTimeoutMaxSeconds {
+		return execTimeoutMaxSeconds
+	}
+	return v
 }
 
 // buildCreateRequest assembles the F5 CreateRequest from the deployment

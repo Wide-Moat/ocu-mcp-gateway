@@ -54,6 +54,36 @@ func TestProvisioningComesFromPolicyNotBody(t *testing.T) {
 	}
 }
 
+// TestClampExecTimeout pins the deployment exec-timeout ceiling resolution (the G2
+// exec-driver hop): an unset (0) config uses the default, and any value is clamped
+// into [min,max] so control never receives an unbounded (0) or out-of-range ceiling
+// — a caller cannot influence it (deployment config, F5 ruling A) and a
+// misconfiguration cannot forward a DoS value. Red-probe: dropping the clamp lets a
+// 0 or 100000 through and reds these bounds.
+func TestClampExecTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		in   uint32
+		want uint32
+	}{
+		{"unset uses default", 0, execTimeoutDefaultSeconds},
+		{"in range passes through", 45, 45},
+		{"above max clamps to max", 100000, execTimeoutMaxSeconds},
+		{"exactly max passes", execTimeoutMaxSeconds, execTimeoutMaxSeconds},
+		{"exactly min passes", execTimeoutMinSeconds, execTimeoutMinSeconds},
+	}
+	for _, c := range cases {
+		if got := clampExecTimeout(c.in); got != c.want {
+			t.Errorf("%s: clampExecTimeout(%d) = %d, want %d", c.name, c.in, got, c.want)
+		}
+	}
+	// The floor must be a real non-zero floor so a clamped value can never be
+	// unbounded (a 0 timeout is the DoS vector the clamp exists to prevent).
+	if execTimeoutMinSeconds == 0 {
+		t.Error("the exec-timeout floor must be non-zero so a clamped value can never be unbounded")
+	}
+}
+
 // TestSessionHintIsCallerTenantOnly proves that with NO chat scope the hint is the
 // caller principal's non-secret Tenant handle — never a credential, never an
 // authority. With a chat scope it is keyed per-chat (see session_hint_test.go).
