@@ -66,6 +66,7 @@ func LoadProvisioningPolicy(path string) (forward.ProvisioningPolicy, error) {
 			MemoryBytes: wire.ResourceCaps.MemoryBytes,
 			PIDsLimit:   wire.ResourceCaps.PIDsLimit,
 		},
+		ExecTimeoutSeconds: wire.ExecTimeoutSeconds,
 	}, nil
 }
 
@@ -93,6 +94,11 @@ type provisioningWire struct {
 		MemoryBytes int64   `json:"memory_bytes"`
 		PIDsLimit   *int64  `json:"pids_limit"`
 	} `json:"resource_caps"`
+	// ExecTimeoutSeconds is the deployment ceiling on a single exec (the G2
+	// exec-driver hop), a DEPLOYMENT-policy value (never caller-controlled). It is
+	// OPTIONAL: an absent field is 0, which the gateway resolves to the safe default
+	// and clamps into [1,300] before forwarding, so a config need not set it.
+	ExecTimeoutSeconds uint32 `json:"exec_timeout_seconds"`
 }
 
 // profileFromWire maps the closed wire vocabulary to the enum. Unknown or empty

@@ -185,9 +185,33 @@ hardened mTLS transport, and maps the reply — failing closed on a transport er
 a non-2xx (never a fabricated success). `Destroy` is LIVE too (`POST
 /v1alpha/sessions/destroy`, the cooperative teardown, never the operator force-kill).
 `Route` is a deliberate fail-closed stub until Control exposes a per-session
-`control_endpoint` (the G2 exec-driver, NFR-IC-05); resolving it through `/status`
+`control_endpoint` (NFR-IC-05); resolving it through `/status`
 would return the wrong contract (`{key,state}`, not an endpoint), so it refuses
 rather than fabricate.
+
+The **EXEC hop is the LIVE second F5 leg** (the G2 exec-driver): after the create
+provisions the session, the forward drives `POST /v1alpha/sessions/exec` — the exact
+`execBody` Control decodes (`{session_hint, argv, env, cwd, stdin_b64, timeout_s}`,
+`DisallowUnknownFields`) — to run the caller's command IN that session and capture
+the guest child's output. It addresses the session by the SAME `session_hint` the
+create used (NOT the reply key, a host-derived correlation that is not an addressable
+hint), under the SAME service credential + mTLS transport, so it inherits the
+fail-closed posture: a down/refusing exec route (a non-2xx) is an `ErrForwardFailed`,
+never a fabricated empty success (the command did not run, so a success would be a
+lie). The `timeout_s` is a DEPLOYMENT-policy ceiling (`ProvisioningPolicy.
+ExecTimeoutSeconds`, F5 ruling A — never caller-controlled, so a caller cannot set 0
+/ unbounded or a huge DoS value); it is clamped into `[1s, 300s]` (default 30) before
+it leaves, so a misconfigured config cannot forward an out-of-range ceiling. A
+tool-call with no exec projection (a non-`bash_tool` tool, or a bare create) skips
+the exec hop and returns the create-only correlation. The exec carries no credential
+(the argv is the caller's own command, no auth-token field exists on `execBody`). The
+guest child's captured streams (base64 on the wire) are projected into an MCP
+`CallToolResult` under the TWO-TIER error model: a NON-ZERO guest exit is a Tier-2
+TOOL error (`isError:true` with the sanitized stderr as content, a legitimate outcome
+the model sees), NOT a transport `ErrForwardFailed` — the forward itself succeeded.
+The command-to-argv translation lives in the ingress (`bash_tool {"command":"..."}` →
+`["bash","-lc",command]`), so the forward package holds the arguments opaque
+(invariant #3).
 
 - **Enforcement:** `internal/forward/no_credential_test.go`
   (`TestForwardShapesCarryNoCredential` — a reflect pass over every forward shape
@@ -222,7 +246,21 @@ rather than fabricate.
   non-2xx control reply is a fail-closed refusal, never a fabricated success;
   `TestDestroyLiveRoundTrip` — the cooperative teardown POSTs
   `/v1alpha/sessions/destroy`; both live paths go RED under a fabricate-success or
-  no-op keystone neuter).
+  no-op keystone neuter). The LIVE exec hop (G2):
+  `internal/forward/exec_hop_test.go`
+  (`TestExecHopForwardsCommandAndProjectsStdout` — a create-then-exec sequence POSTs
+  `/v1alpha/sessions/exec` with the caller argv under the SAME `session_hint` and
+  projects the guest stdout into a `CallToolResult`; the two-route control-mock reds
+  it if the hop is skipped; `TestExecHopFailsClosedWhenExecRouteDown` — a down exec
+  route fails the whole tool-call closed, never a fabricated empty 200 (the fake-green
+  guard); `TestExecHopToolFailIsTierTwoNotTransportFail` — a non-zero guest exit is a
+  Tier-2 `isError:true` result, NOT a transport fail; each reds under a two-sided
+  neuter that swallows the exec failure, collapses the tier boundary, or skips the
+  hop). The ingress argv-derivation + result framing:
+  `internal/ingress/exec_projection_test.go`
+  (`TestBashToolArgvIsDerivedFromCommand` — `bash_tool {"command":...}` forwards
+  `["bash","-lc",command]`; `TestExecResultIsFramedWithEchoedID` — the result is
+  framed with the echoed JSON-RPC id).
   The SHIPPED wiring (a self-audit found the composition root calling a legacy
   endpoint-only constructor AROUND these guards — the guarded path existed,
   production did not walk it): the legacy `NewControlForwarder` was REMOVED, so
@@ -283,6 +321,15 @@ distroless container is diagnosable; the caller still receives only the stable
 forward ERROR only, which carries no credential or request body (the caller bearer
 and the service token are not part of the error and are not read there).
 
+The forwarded tool RESULT is VALIDATED OUTBOUND before it reaches the caller: the
+projected `CallToolResult` (from the G2 exec hop) is validated against
+`KindCallToolResult` — the outbound counterpart of the inbound profile gate — so a
+control/guest/projection bug that produced a malformed or oversized result is a
+FAIL-CLOSED refusal (a leak-free `500`), never a malformed or over-ceiling body
+handed to the caller. The valid result is then framed into the JSON-RPC envelope
+with the echoed request id; a forward with no exec projection keeps the minimal
+`{"jsonrpc":"2.0"}` body with the correlation in the header.
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant5_LeakFreeOutbound` — a realistically-wrapped forward error is
   not relayed; planting `ferr.Error()` into the response goes RED) and
@@ -293,6 +340,10 @@ and the service token are not part of the error and are not read there).
   failure logs its cause; removing the log goes RED; `TestForwardDiagIsLeakFree` —
   the diagnostic never contains the caller bearer or an Authorization field;
   `TestForwardSuccessLogsNothing` — a success is silent, the diag is failures-only).
+  The outbound result validation: `internal/ingress/exec_projection_test.go`
+  (`TestMalformedExecResultFailsClosed` — a forwarded result that is not a valid
+  `CallToolResult` is a fail-closed `500`, never relayed as a `200`; removing the
+  outbound `Validate` goes RED).
 
 ## VI. The protocol revision is pinned per connection (NFR-IC-04)
 

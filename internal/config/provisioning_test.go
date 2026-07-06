@@ -103,3 +103,32 @@ func TestLoadProvisioningPolicyLeavesAbsentPidsNil(t *testing.T) {
 		t.Errorf("absent pids_limit must map to nil (the constructor refuses it), got %v", *got.ResourceCaps.PIDsLimit)
 	}
 }
+
+// TestLoadProvisioningPolicyMapsExecTimeout pins the deployment exec-timeout
+// ceiling (the G2 exec-driver hop): a configured exec_timeout_seconds maps onto the
+// policy, so a deployment can retune the interactive-command ceiling. It is a
+// DEPLOYMENT-policy value (F5 ruling A), never caller-controlled. The gateway clamps
+// it into [1,300] with a 30 default before forwarding, so an absent field (0) is the
+// "use default" signal, validated at the forward, not here.
+func TestLoadProvisioningPolicyMapsExecTimeout(t *testing.T) {
+	withTimeout := strings.Replace(validPolicyJSON,
+		`"resource_caps": {"cpu_cores": 1.0, "memory_bytes": 536870912, "pids_limit": 512}`,
+		`"resource_caps": {"cpu_cores": 1.0, "memory_bytes": 536870912, "pids_limit": 512}, "exec_timeout_seconds": 45`,
+		1)
+	got, err := LoadProvisioningPolicy(writePolicy(t, withTimeout))
+	if err != nil {
+		t.Fatalf("LoadProvisioningPolicy: %v", err)
+	}
+	if got.ExecTimeoutSeconds != 45 {
+		t.Errorf("exec_timeout_seconds must map onto the policy (45), got %d", got.ExecTimeoutSeconds)
+	}
+
+	// Absent → 0 (the "use default" signal the clamp resolves to 30 at forward time).
+	got2, err := LoadProvisioningPolicy(writePolicy(t, validPolicyJSON))
+	if err != nil {
+		t.Fatalf("LoadProvisioningPolicy: %v", err)
+	}
+	if got2.ExecTimeoutSeconds != 0 {
+		t.Errorf("an absent exec_timeout_seconds must map to 0 (use-default), got %d", got2.ExecTimeoutSeconds)
+	}
+}

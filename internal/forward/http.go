@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"unicode/utf8"
 )
 
 // The F5 wire is HTTP/JSON over the hardened mTLS-1.3 transport, NOT gRPC. The
@@ -27,6 +29,10 @@ const (
 	createPath = "/v1alpha/sessions"
 	// destroyPath is the cooperative service teardown route (NOT operator force-kill).
 	destroyPath = "/v1alpha/sessions/destroy"
+	// execPath is the Control gateway-ingress exec route (G2 exec-driver). It runs
+	// a command in the session the create hop provisioned, keyed by the SAME
+	// session_hint.
+	execPath = "/v1alpha/sessions/exec"
 )
 
 // createBodyWire is the EXACT JSON shape the Control gateway-ingress createBody
@@ -90,6 +96,50 @@ type destroyBodyWire struct {
 type sessionResponseWire struct {
 	Key   string `json:"key"`
 	State int    `json:"state"`
+}
+
+// execBodyWire is the EXACT JSON shape Control's gateway-ingress execBody decodes
+// (ocu-control serve.go:251), decoded there with DisallowUnknownFields. The gateway
+// sends the addressed session_hint (the SAME one the create hop used — the exec
+// addresses the session create just provisioned, NOT the reply key, which is a
+// host-derived correlation and not an addressable hint), the command argv, and the
+// deployment timeout ceiling. Env/Cwd/StdinB64 are carried for completeness but a
+// bare tool-call leaves them empty. There is NO credential field: the Storage-JWT
+// rides the F7 mount push, never an exec body (custody).
+type execBodyWire struct {
+	SessionHint string            `json:"session_hint"`
+	Argv        []string          `json:"argv"`
+	Env         map[string]string `json:"env,omitempty"`
+	Cwd         string            `json:"cwd,omitempty"`
+	StdinB64    string            `json:"stdin_b64,omitempty"`
+	TimeoutS    uint32            `json:"timeout_s"`
+}
+
+// execResponseWire is Control's execResponse (serve.go:289): the guest child's
+// exit code and the base64-captured, per-stream-bounded output with truncation
+// flags. A non-zero ExitCode is a legitimate TOOL outcome (a Tier-2 error the
+// caller sees), NOT a transport failure — the ingress projects it into a
+// CallToolResult{isError:true}, it does not become an ErrForwardFailed.
+type execResponseWire struct {
+	ExitCode        uint8  `json:"exit_code"`
+	StdoutB64       string `json:"stdout_b64"`
+	StderrB64       string `json:"stderr_b64"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	StderrTruncated bool   `json:"stderr_truncated"`
+}
+
+// ExecResult is the projected, transport-neutral result of the exec hop the
+// ingress relays to the caller. It carries the guest child's captured output
+// (already base64-decoded from the wire) and the tool-outcome flag. IsToolError is
+// the Tier-2 distinction: a non-zero guest exit is a tool error (isError:true in
+// the CallToolResult), which is NOT a forward failure — the forward itself
+// succeeded, the command ran and reported a non-zero status.
+type ExecResult struct {
+	Stdout          string
+	Stderr          string
+	IsToolError     bool
+	StdoutTruncated bool
+	StderrTruncated bool
 }
 
 // ServiceIdentity is the gateway's own identity presented on the F5 forward. It
@@ -239,11 +289,47 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 			return SessionResponse{}, fmt.Errorf("%w: decode create reply: %w", ErrForwardFailed, err)
 		}
 
+		// (2nd hop) EXEC — the G2 exec-driver leg. The create hop provisioned the
+		// session; the exec hop runs the caller's command IN it and captures the
+		// guest child's output. It addresses the session by the SAME session_hint
+		// create used (create.SessionHint), NOT reply.Key — the key is a host-derived
+		// correlation, not an addressable hint. A tool-call with no argv (a tool that
+		// has no exec projection) skips the exec hop and returns the create-only
+		// correlation. The exec runs under the same service credential + mTLS
+		// transport, so it inherits the fail-closed posture: a down/refusing exec
+		// route is a postJSON non-2xx → ErrForwardFailed, never a fabricated success.
+		if len(req.ToolCall.Argv) == 0 {
+			return SessionResponse{Correlation: reply.Key}, nil
+		}
+
+		execWire := execBodyWire{
+			SessionHint: create.SessionHint,
+			Argv:        req.ToolCall.Argv,
+			TimeoutS:    clampExecTimeout(f.provisioning.ExecTimeoutSeconds),
+		}
+		execBody, err := f.postJSON(ctx, token, execPath, execWire)
+		if err != nil {
+			// A transport-level exec failure (route down, non-2xx) fails the whole
+			// tool-call closed (invariant #9). The command did NOT run, so a success
+			// would be a lie — this is the fake-green guard.
+			return SessionResponse{}, err
+		}
+
+		var execReply execResponseWire
+		if err := json.Unmarshal(execBody, &execReply); err != nil {
+			return SessionResponse{}, fmt.Errorf("%w: decode exec reply: %w", ErrForwardFailed, err)
+		}
+		result, err := projectCallToolResult(execReply)
+		if err != nil {
+			return SessionResponse{}, err
+		}
+
 		// Identifier-minimization at the boundary (invariant #5): the host-derived key
 		// is surfaced ONLY as the stable correlation handle — never as an addressable
-		// session id or internal topology. The lifecycle state is not relayed as
-		// caller authority. The ingress response path performs the final minimization.
-		return SessionResponse{Correlation: reply.Key}, nil
+		// session id or internal topology. The projected CallToolResult carries the
+		// guest output; the ingress response path performs the final outbound
+		// validation and JSON-RPC framing before it reaches the caller.
+		return SessionResponse{Correlation: reply.Key, Result: result}, nil
 	}
 
 	// Defensive fail-closed: an endpoint with no hardened transport. Unreachable
@@ -382,4 +468,84 @@ func mountWireFrom(m MountIntent) *mountIntentWire {
 		ReadOnly:       m.ReadOnly,
 		CacheDurationS: m.CacheDurationS,
 	}
+}
+
+// callToolResult / contentBlock are the MCP CallToolResult projection the exec hop
+// produces (matching the vendored boundedCallToolResult overlay: content text
+// blocks + the Tier-2 isError flag). The gateway emits only text content for exec
+// output. The struct is marshaled to the result bytes the ingress validates
+// against KindCallToolResult and frames into the JSON-RPC reply.
+type callToolResult struct {
+	Content []contentBlock `json:"content"`
+	IsError bool           `json:"isError"`
+}
+
+type contentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// maxExecContentBytes bounds the per-stream captured output the gateway relays in
+// a CallToolResult content block. Control already bounds the exec streams host-side
+// (per-stream stdio ceiling) and sets the truncation flags; this is the gateway's
+// own defence-in-depth pre-buffer cap so an unexpectedly large stream cannot push
+// the CallToolResult over its schema/byte ceiling (NFR-SEC-46). It is a rune-safe
+// truncation (never splits a multi-byte rune).
+const maxExecContentBytes = 64 << 10
+
+// projectCallToolResult maps Control's execResponse into the MCP CallToolResult the
+// caller receives. The TWO-TIER error model (x-ocu-error-model): a NON-ZERO guest
+// exit is a Tier-2 TOOL error — isError:true with the sanitized stderr as content —
+// NOT a transport failure (the forward itself succeeded). A zero exit projects the
+// stdout as content with isError:false. The captured streams are base64 on the wire
+// (a []byte, never a credential); a decode failure is a fail-closed ErrForwardFailed
+// (a malformed control reply must not become a silent empty success). Output is
+// bounded (maxExecContentBytes) as defence-in-depth over control's own ceiling.
+func projectCallToolResult(reply execResponseWire) ([]byte, error) {
+	stdout, err := base64.StdEncoding.DecodeString(reply.StdoutB64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: exec stdout_b64 is not valid base64", ErrForwardFailed)
+	}
+	stderr, err := base64.StdEncoding.DecodeString(reply.StderrB64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: exec stderr_b64 is not valid base64", ErrForwardFailed)
+	}
+
+	isErr := reply.ExitCode != 0
+	// On a tool error the model must see the failure: relay stderr (falling back to
+	// stdout if the child wrote its error there). On success relay stdout.
+	text := string(stdout)
+	if isErr {
+		if len(stderr) > 0 {
+			text = string(stderr)
+		} else {
+			text = string(stdout)
+		}
+	}
+	text = boundContent(text)
+
+	result := callToolResult{
+		Content: []contentBlock{{Type: "text", Text: text}},
+		IsError: isErr,
+	}
+	blob, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal CallToolResult: %w", ErrForwardFailed, err)
+	}
+	return blob, nil
+}
+
+// boundContent rune-safely truncates a content string to maxExecContentBytes so an
+// oversized stream cannot push the CallToolResult over its ceiling. It truncates on
+// a rune boundary (never a partial multi-byte rune).
+func boundContent(s string) string {
+	if len(s) <= maxExecContentBytes {
+		return s
+	}
+	// Back off to a rune boundary at or before the byte cap.
+	cut := maxExecContentBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
