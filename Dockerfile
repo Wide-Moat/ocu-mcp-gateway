@@ -54,11 +54,14 @@ COPY --from=build /out/ocu-mcp-gatewayd /usr/local/bin/ocu-mcp-gatewayd
 
 USER nonroot:nonroot
 
-# HEALTHCHECK uses the daemon's own -health-check self-probe: it prints "ok" and
-# exits 0 when the binary runs. The distroless image has no shell or curl, so the
-# daemon binary is its own liveness probe (mirrors ocu-control). A richer
-# readiness probe (boot-set loaded) is a follow-up wired to the Sequencer.
+# HEALTHCHECK uses the daemon's own -health-check self-probe: it dials the running
+# daemon's /healthz over the SAME listen address the ENTRYPOINT binds and exits 0
+# iff it answers 200 (READINESS: boot-set loaded AND the listener up), non-zero on
+# a refused dial or a 503 (not-ready). The distroless image has no shell or curl,
+# so the daemon binary is its own probe (mirrors ocu-control). The -listen here
+# MUST match the address the serving container binds; a deployment that moves the
+# listen address overrides this probe with its own -listen.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/ocu-mcp-gatewayd", "-health-check"]
+    CMD ["/usr/local/bin/ocu-mcp-gatewayd", "-health-check", "-listen", "0.0.0.0:8080"]
 
 ENTRYPOINT ["/usr/local/bin/ocu-mcp-gatewayd"]
