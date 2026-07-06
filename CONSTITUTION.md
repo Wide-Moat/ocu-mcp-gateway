@@ -363,14 +363,31 @@ authors the hash-chain at ingest (the gateway supplies only the sequence). The
 contract is the vendored `contracts/audit/audit-fanin.asyncapi.yaml` (channel
 `mcpGatewayAudit`, payload OCSF ApiActivity).
 
+The durable sink is selected at boot: a configured `-audit-sink` is the
+fleet-aligned append-only FILE sink (each OCSF envelope rendered as one
+newline-delimited JSON line, fsync'd BEFORE the emit returns — the same format the
+control-plane audit spine uses), and it fails closed on a short write, an fsync
+failure, or a write after close, so a durable-write failure is still a hard deny.
+With no `-audit-sink` the emitter falls back to the network bus sink (`-audit-bus`,
+contract #150), which is not yet wired and therefore fails closed on every emit —
+so an unconfigured audit surface is a 500, never a silent drop. Opening the file
+sink fails at BOOT if the path is unwritable, so the daemon never binds a listener
+behind a discarded audit trail.
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestF10_AuditWriteFailureIsRefusal` — a forward that succeeds but whose audit
   write fails is refused 500, not acked 200; planting an ignored emit error goes
   RED) and (`TestF10_AuditActorIsHostAttested` — the emitted actor is the resolved
   KeyID, a body `caller` claim does not appear). The emitter's own fail-closed
   contract: `internal/audit/audit_test.go` (`TestEmitWriteFailureIsRefusal`,
-  `TestSequenceMonotonicAndUnique`, `TestEmitInvalidEnvelopeRefused`). The §XI
-  refusal-recording: `internal/ingress/refusal_audit_test.go`
+  `TestSequenceMonotonicAndUnique`, `TestEmitInvalidEnvelopeRefused`). The durable
+  FILE sink: `internal/audit/filesink_test.go` (`TestFileSinkPublishAppendsDurableLine`
+  — one newline-delimited line, nil on success; `TestFileSinkPublishAppendsNotTruncates`
+  — append-only; `TestFileSinkPublishFailsClosedOnShortWrite`,
+  `TestFileSinkPublishFailsClosedOnFsyncError`,
+  `TestFileSinkPublishFailsClosedAfterClose`, `TestFileSinkOpenFailsClosedOnBadPath`
+  — every durability failure is a hard deny; neutering Publish to ack without a
+  write goes RED). The §XI refusal-recording: `internal/ingress/refusal_audit_test.go`
   (`TestForwardRefusalIsRecorded` / `TestCeilingRefusalIsRecorded` — a 502/429
   post-auth refusal records exactly one OutcomeFailure event with the resolved
   actor; removing either refusal emit goes RED; `TestRefusalAuditIsFailClosed` —

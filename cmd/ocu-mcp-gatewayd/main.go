@@ -65,6 +65,7 @@ type options struct {
 	connCeiling     int
 	allowedOrigins  originList
 	auditBus        string
+	auditSink       string
 	serializeDepth  int
 	deployment      string
 	refreshInterval time.Duration
@@ -110,7 +111,8 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.controlClientKey, "control-client-key", "", "path to the gateway's F5 mTLS client key (required with -control-url)")
 	fs.IntVar(&o.connCeiling, "conn-ceiling", 64, "max concurrent in-flight requests per audience-validated caller (NFR-SEC-53)")
 	fs.Var(&o.allowedOrigins, "allowed-origin", "allowed browser Origin for the DNS-rebinding guard (repeatable); originless callers are always allowed")
-	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in); empty fails closed on emit")
+	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in over a network bus; not yet wired — a future follow-up, contract #150)")
+	fs.StringVar(&o.auditSink, "audit-sink", "", "durable OCSF audit file (append-only newline-delimited JSON, fsync-before-ack); the fleet-aligned F10 sink. Empty AND empty -audit-bus fails closed on every emit")
 	fs.IntVar(&o.serializeDepth, "serialize-max-depth", 64, "max queued tool-calls per session before refusal (NFR-IC-05 per-session serializer; DoS guard on the session key)")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
@@ -252,10 +254,27 @@ func serve(ctx context.Context, o options) error {
 	// (CLI/SDK) caller; browser origins are opted in via -allowed-origin.
 	origin := ingress.NewOriginPolicy(o.allowedOrigins)
 
-	// Build the F10 OCSF audit emitter over the durable bus sink. With no audit
-	// bus configured it fails closed on emit (a forward cannot ack without a
-	// durable record, NFR-SEC-03).
-	emitter, err := audit.NewEmitter(audit.NewBusSink(o.auditBus))
+	// Build the F10 OCSF audit sink and emitter. A configured -audit-sink is the
+	// fleet-aligned durable FILE sink: it appends each OCSF envelope as one
+	// newline-delimited JSON line and fsyncs BEFORE the emit returns, so a forward
+	// cannot ack without a durable record (emit-before-ack, NFR-SEC-03). With no
+	// -audit-sink the emitter falls back to the network bus sink (-audit-bus,
+	// contract #150), which is not yet wired and fails closed on every emit — so an
+	// unconfigured audit surface is a hard deny, never a silent drop. Opening the
+	// file sink fails at BOOT if the path is unwritable, so the daemon never boots
+	// with a discarded audit trail.
+	var sink audit.Sink
+	if o.auditSink != "" {
+		fileSink, ferr := audit.OpenFileSink(o.auditSink)
+		if ferr != nil {
+			return fmt.Errorf("serve: open audit file sink: %w", ferr)
+		}
+		defer func() { _ = fileSink.Close() }()
+		sink = fileSink
+	} else {
+		sink = audit.NewBusSink(o.auditBus)
+	}
+	emitter, err := audit.NewEmitter(sink)
 	if err != nil {
 		return fmt.Errorf("serve: build audit emitter: %w", err)
 	}
