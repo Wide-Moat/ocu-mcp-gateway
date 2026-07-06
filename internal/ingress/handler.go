@@ -430,12 +430,21 @@ func toolCallFrom(raw []byte) forward.ToolCall {
 // validated tool-call's name and arguments. The command-parsing lives HERE (not in
 // the forward package) so the forward keeps the arguments opaque (invariant #3):
 // the gateway translates the OCU tool surface into an argv exactly once, at the
-// ingress boundary. bash_tool {"command":"..."} runs the command under a login
-// shell (["bash","-lc",command]) — the same shape the upstream computer-use tool
-// uses. A tool with no exec projection (or a missing command) yields a nil Argv,
-// which the forward reads as "no exec hop" (the create-only path). It injects no
-// credential: the argv is the caller's own command, run under the provisioned
-// session, never an authority.
+// ingress boundary. bash_tool {"command":"..."} runs the command through the POSIX
+// shell (["/bin/sh","-c",command]). The interpreter is deliberate:
+//   - /bin/sh, not bash: an image that supports bash_tool guarantees a POSIX
+//     /bin/sh (the guest-image contract); a `bash` binary is promised by no guest
+//     contract, so naming it risks an ENOENT in a busybox-only guest.
+//   - an ABSOLUTE path, not a bare name: it does not depend on PATH resolution in a
+//     near-empty guest.
+//   - -c, not -lc: `-l` (login) is a bash/ash extension undefined for a busybox
+//     `sh`, and a login shell is not wanted for a stateless tool-call (no profiles;
+//     env comes from the container config; determinism is a sandbox plus).
+//
+// A tool with no exec projection (or a missing command) yields a nil Argv, which the
+// forward reads as "no exec hop" (the create-only path). It injects no credential:
+// the argv is the caller's own command, run under the provisioned session, never an
+// authority.
 func argvFromToolCall(name string, arguments json.RawMessage) []string {
 	if name != "bash_tool" {
 		// Only bash_tool has an exec-argv projection wired in this hop; the other
@@ -450,5 +459,5 @@ func argvFromToolCall(name string, arguments json.RawMessage) []string {
 	if err := json.Unmarshal(arguments, &args); err != nil || args.Command == "" {
 		return nil
 	}
-	return []string{"bash", "-lc", args.Command}
+	return []string{"/bin/sh", "-c", args.Command}
 }

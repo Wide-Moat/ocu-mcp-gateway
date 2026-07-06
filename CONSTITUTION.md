@@ -210,8 +210,13 @@ guest child's captured streams (base64 on the wire) are projected into an MCP
 TOOL error (`isError:true` with the sanitized stderr as content, a legitimate outcome
 the model sees), NOT a transport `ErrForwardFailed` — the forward itself succeeded.
 The command-to-argv translation lives in the ingress (`bash_tool {"command":"..."}` →
-`["bash","-lc",command]`), so the forward package holds the arguments opaque
-(invariant #3).
+`["/bin/sh","-c",command]`), so the forward package holds the arguments opaque
+(invariant #3). The interpreter is the POSIX `/bin/sh` (an absolute path, `-c` not
+`-lc`): an image that supports `bash_tool` guarantees a POSIX `/bin/sh` (the
+guest-image contract), so the gateway does not name a `bash` binary no guest
+contract promises, nor depend on PATH resolution in a near-empty guest; `-l` (login)
+is a non-POSIX extension undefined for a busybox `sh` and unwanted for a stateless
+tool-call.
 
 - **Enforcement:** `internal/forward/no_credential_test.go`
   (`TestForwardShapesCarryNoCredential` — a reflect pass over every forward shape
@@ -259,7 +264,7 @@ The command-to-argv translation lives in the ingress (`bash_tool {"command":"...
   hop). The ingress argv-derivation + result framing:
   `internal/ingress/exec_projection_test.go`
   (`TestBashToolArgvIsDerivedFromCommand` — `bash_tool {"command":...}` forwards
-  `["bash","-lc",command]`; `TestExecResultIsFramedWithEchoedID` — the result is
+  `["/bin/sh","-c",command]` (POSIX shell, not `bash`); `TestExecResultIsFramedWithEchoedID` — the result is
   framed with the echoed JSON-RPC id).
   The SHIPPED wiring (a self-audit found the composition root calling a legacy
   endpoint-only constructor AROUND these guards — the guarded path existed,
