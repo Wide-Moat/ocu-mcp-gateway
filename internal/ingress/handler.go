@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
@@ -148,6 +149,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.validator.ValidateSingleMessageEnvelope(raw); err != nil {
 		writeProfileDeny(w, err)
+		return
+	}
+
+	// (3a) JSON-RPC notification — a message with NO id (or a notifications/*
+	// method) is fire-and-forget: it takes NO response body. The stateless
+	// streamable-HTTP transport the SDK speaks acknowledges it 202 Accepted with an
+	// empty body. The SDK sends notifications/initialized right after initialize;
+	// answering it with a JSON-RPC error (or any body) closes the SDK transport
+	// (BrokenResourceError) on the next request. A notification NEVER reaches the
+	// forwarder or the validation path — it is acknowledged and dropped.
+	if isNotification(raw) {
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
@@ -359,6 +372,22 @@ func methodFrom(raw []byte) string {
 	}
 	_ = json.Unmarshal(raw, &msg)
 	return msg.Method
+}
+
+// isNotification reports whether the message is a JSON-RPC notification —
+// fire-and-forget, taking no response. Per JSON-RPC a message with NO id is a
+// notification; the MCP notifications/* methods are notifications by name. Either
+// is acknowledged 202 with an empty body and never forwarded. The id is decoded as
+// RawMessage so a present-but-null id (`"id":null`) is also treated as absent (the
+// JSON-RPC spec's notification form).
+func isNotification(raw []byte) bool {
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	_ = json.Unmarshal(raw, &msg)
+	idAbsent := len(msg.ID) == 0 || string(msg.ID) == "null"
+	return idAbsent || strings.HasPrefix(msg.Method, "notifications/")
 }
 
 // toolCallFrom extracts the forwarded ToolCall from the validated raw body. The
