@@ -151,8 +151,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// (3b) MCP handshake — answered GATEWAY-LOCAL, never forwarded. The official
+	// client SDK runs initialize + tools/list before it can call a tool; the
+	// gateway answers both here (behind auth) so it is a drop-in for the old
+	// endpoint. These methods NEVER build a SessionRequest and NEVER reach the
+	// forwarder — only tools/call forwards — so the method-confusion guard
+	// (invariant #17) holds: a handshake method cannot ride the F5 leg. Any method
+	// that is NOT a handshake method falls through to the tools/call path below,
+	// where the allowlist denies anything that is not tools/call.
+	switch methodFrom(raw) {
+	case "initialize":
+		writeInitializeResult(w, raw)
+		return
+	case "tools/list":
+		writeToolsList(w, raw)
+		return
+	}
+
 	// (4) Profile validation — invariant #1. Validate the tool-call request
 	// (base-then-OCU-profile) BEFORE any forward. A deny here forwards nothing.
+	// Only tools/call reaches here; the allowlist refuses any other method -32601.
 	if err := h.validator.Validate(profile.KindCallToolRequest, raw); err != nil {
 		writeProfileDeny(w, err)
 		return
@@ -329,6 +347,18 @@ func readBounded(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// methodFrom extracts the JSON-RPC method name from the (envelope-validated) raw
+// body so the handler can route the MCP handshake methods gateway-local before the
+// tools/call forward path. A decode miss yields an empty method, which is not a
+// handshake method and falls through to the allowlist deny.
+func methodFrom(raw []byte) string {
+	var msg struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal(raw, &msg)
+	return msg.Method
 }
 
 // toolCallFrom extracts the forwarded ToolCall from the validated raw body. The
