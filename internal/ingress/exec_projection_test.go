@@ -13,18 +13,27 @@ import (
 
 // The G2 exec-driver ingress half: the handler derives the guest command argv from
 // the validated tool arguments (a bash_tool {"command":"..."} becomes
-// ["bash","-lc",command]) so the forward's exec hop can run it, and it frames the
+// ["/bin/sh","-c",command]) so the forward's exec hop can run it, and it frames the
 // forwarded CallToolResult into the JSON-RPC reply with the ECHOED request id,
 // VALIDATING it outbound (KindCallToolResult) before it reaches the caller. These
 // close the fake-green root: the old create-only path returned {"jsonrpc":"2.0"}
 // with no result, so a tool-call never carried a command down nor a result back.
 
 // TestBashToolArgvIsDerivedFromCommand is the argv keystone: a tools/call for
-// bash_tool with {"command":"echo hi"} must forward Argv=["bash","-lc","echo hi"]
+// bash_tool with {"command":"echo hi"} must forward Argv=["/bin/sh","-c","echo hi"]
 // so the exec hop runs the caller's command. The command-parsing lives in ingress
 // (the forward keeps arguments opaque, invariant #3), so this is where it is pinned.
 //
-// Red-probe: with no argvFromToolCall the forwarded Argv is empty and this reds.
+// The interpreter is the POSIX /bin/sh (an ABSOLUTE path, `-c` not `-lc`): `-l`
+// (login) is a bash/ash extension, undefined for a busybox `sh`, and a login shell
+// is not wanted for a stateless tool-call (no profiles, env comes from the
+// container config, determinism is a sandbox plus). An image that supports bash_tool
+// GUARANTEES a POSIX /bin/sh (the guest-image contract), so the gateway does not
+// depend on a `bash` binary that no guest contract promises, nor on PATH resolution
+// in a near-empty guest.
+//
+// Red-probe: with no argvFromToolCall the forwarded Argv is empty and this reds;
+// with the prior ["bash","-lc",...] the interpreter/flag assertions red.
 func TestBashToolArgvIsDerivedFromCommand(t *testing.T) {
 	fwd := &recordingForwarder{resp: forward.SessionResponse{
 		Correlation: "c1",
@@ -42,8 +51,8 @@ func TestBashToolArgvIsDerivedFromCommand(t *testing.T) {
 		t.Fatal("the tool-call must reach the forwarder")
 	}
 	argv := fwd.got.ToolCall.Argv
-	if len(argv) != 3 || argv[0] != "bash" || argv[1] != "-lc" || argv[2] != "echo hi" {
-		t.Errorf("bash_tool {\"command\":\"echo hi\"} must forward argv [bash -lc \"echo hi\"], got %v", argv)
+	if len(argv) != 3 || argv[0] != "/bin/sh" || argv[1] != "-c" || argv[2] != "echo hi" {
+		t.Errorf("bash_tool {\"command\":\"echo hi\"} must forward argv [/bin/sh -c \"echo hi\"], got %v", argv)
 	}
 }
 

@@ -140,7 +140,7 @@ func TestExecHopForwardsCommandAndProjectsStdout(t *testing.T) {
 	resp, err := f.Forward(context.Background(), SessionRequest{
 		Principal:   auth.Caller{KeyID: "k1", Tenant: "tenant-a"},
 		SessionHint: "chat-7",
-		ToolCall:    ToolCall{Name: "bash_tool", Argv: []string{"bash", "-lc", "echo hi"}},
+		ToolCall:    ToolCall{Name: "bash_tool", Argv: []string{"/bin/sh", "-c", "echo hi"}},
 	})
 	if err != nil {
 		t.Fatalf("live create+exec must succeed, got %v", err)
@@ -203,7 +203,7 @@ func TestExecHopFailsClosedWhenExecRouteDown(t *testing.T) {
 	_, ferr := f.Forward(context.Background(), SessionRequest{
 		Principal:   auth.Caller{Tenant: "tenant-a"},
 		SessionHint: "chat-1",
-		ToolCall:    ToolCall{Name: "bash_tool", Argv: []string{"bash", "-lc", "echo hi"}},
+		ToolCall:    ToolCall{Name: "bash_tool", Argv: []string{"/bin/sh", "-c", "echo hi"}},
 	})
 	if !errors.Is(ferr, ErrForwardFailed) {
 		t.Fatalf("a down exec route must fail the whole tool-call closed (ErrForwardFailed), got %v", ferr)
@@ -231,7 +231,7 @@ func TestExecHopToolFailIsTierTwoNotTransportFail(t *testing.T) {
 	resp, ferr := f.Forward(context.Background(), SessionRequest{
 		Principal:   auth.Caller{Tenant: "tenant-a"},
 		SessionHint: "chat-2",
-		ToolCall:    ToolCall{Name: "bash_tool", Argv: []string{"bash", "-lc", "nope"}},
+		ToolCall:    ToolCall{Name: "bash_tool", Argv: []string{"/bin/sh", "-c", "nope"}},
 	})
 	// A non-zero guest exit is NOT a transport failure — the forward itself succeeded.
 	if ferr != nil {
