@@ -31,6 +31,12 @@ services:
       - -control-client-cert=/etc/ocu/f5-mtls/client.pem
       - -control-client-key=/etc/ocu/f5-mtls/client-key.pem
       - -conn-ceiling=64
+      # F10 OCSF audit (emit-before-ack, fail-closed durable-first, NFR-SEC-03):
+      # the fleet-aligned append-only file sink. Without it every terminated
+      # request fails closed at emit (500), so this is required for a keyed create
+      # to reach 201. The format is newline-delimited OCSF JSON, the same the
+      # control-plane audit spine writes.
+      - -audit-sink=/var/log/ocu-mcp-gateway/audit.ocsf.jsonl
     volumes:
       # The Control-owned, root-owned hashed boot-set (salted SHA-256 only,
       # never plaintext). Mounted read-only.
@@ -58,6 +64,13 @@ services:
         source: ./f5-mtls
         target: /etc/ocu/f5-mtls
         read_only: true
+      # The F10 OCSF audit spine directory — WRITABLE (the gateway appends and
+      # fsyncs each envelope here before acking). The only writable mount; every
+      # other is read-only.
+      - type: bind
+        source: ./audit
+        target: /var/log/ocu-mcp-gateway
+        read_only: false
     networks:
       # Agent-facing: inbound MCP tool-calls (F1).
       - ocu-agent-net
