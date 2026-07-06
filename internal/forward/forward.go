@@ -59,6 +59,14 @@ type SessionRequest struct {
 	// the two-pass profile validation before reaching here; the gateway forwards
 	// the request to the Control plane and goes no further (no sandbox edge).
 	ToolCall ToolCall
+
+	// SessionHint is the caller-influenced chat scope (from the X-Chat-Id transport
+	// header) that keys the session PER-CHAT. It is a HINT (NFR-SEC-43), never
+	// identity — the authority stays the mTLS-SAN-derived principal. Empty for a
+	// caller that supplies no chat scope, in which case the hint falls back to the
+	// tenant handle. Sourced from the TRANSPORT header, never the JSON body
+	// (invariant #2).
+	SessionHint string
 }
 
 // ToolCall is the validated, bounded tool-call the gateway forwards. It carries

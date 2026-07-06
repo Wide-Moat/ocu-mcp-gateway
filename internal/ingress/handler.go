@@ -192,6 +192,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req := forward.SessionRequest{
 		Principal: caller,
 		ToolCall:  toolCallFrom(raw),
+		// The chat scope keys the session per-chat so a chat's tool-calls reuse one
+		// guest session (control resumes it) instead of colliding on a per-tenant
+		// reservation (the 409). Read from the X-Chat-Id TRANSPORT header, never the
+		// JSON body (invariant #2); a caller-influenced HINT, never identity
+		// (NFR-SEC-43).
+		SessionHint: r.Header.Get("X-Chat-Id"),
 	}
 
 	// (4b) Per-session tool-call serialization — NFR-IC-05. Tool execution is
