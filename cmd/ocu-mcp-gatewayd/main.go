@@ -130,10 +130,14 @@ func run(args []string) error {
 		return nil
 	}
 	if o.healthCheck {
-		// A minimal liveness check: the binary runs. A richer readiness probe
-		// (boot-set loaded) is a follow-up wired to the Sequencer.
-		fmt.Println("ok")
-		return nil
+		// A readiness probe, not a bare liveness check: dial the daemon's /healthz
+		// over the SAME listen address the serving path binds, and exit 0 iff it
+		// answers 200 (boot-set loaded AND the listener up). A refused dial, a 503
+		// (not-ready), or a timeout is a non-zero exit — the honest red a
+		// `depends_on: service_healthy` gate relies on. The probe boots nothing.
+		probeCtx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+		defer cancel()
+		return healthCheckProbe(probeCtx, o.listenAddr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -269,6 +273,18 @@ func serve(ctx context.Context, o options) error {
 		return fmt.Errorf("serve: build handler: %w", err)
 	}
 
+	// Wrap the MCP handler with the unauthenticated /healthz readiness gate. The
+	// gate reports ready iff the boot Sequencer is ready (boot-set loaded); serving
+	// the gate on the SAME listener means the -health-check probe dials the one
+	// address the container binds, so `depends_on: service_healthy` becomes an
+	// honest readiness gate (it flips green only once the gateway can accept
+	// traffic). Every non-/healthz path still reaches the authenticating MCP
+	// handler unchanged.
+	mux := ingress.NewReadinessMux(handler, seq.Ready)
+	if mux == nil {
+		return errors.New("serve: build readiness mux failed (nil handler or predicate; fail-closed)")
+	}
+
 	// Bind the listener — strictly AFTER readiness. Local binds use the
 	// loopback-or-configured address; production schedules a single instance.
 	if !seq.Ready() {
@@ -278,7 +294,7 @@ func serve(ctx context.Context, o options) error {
 	if err != nil {
 		return fmt.Errorf("serve: bind %q: %w", o.listenAddr, err)
 	}
-	srv := ingress.NewServer(ln, handler)
+	srv := ingress.NewServer(ln, mux)
 	fmt.Printf("ocu-mcp-gatewayd: serving MCP on %s (service-identity %q)\n", o.listenAddr, o.identity)
 	return srv.Serve(ctx)
 }
