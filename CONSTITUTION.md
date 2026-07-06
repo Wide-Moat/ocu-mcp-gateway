@@ -270,12 +270,24 @@ internal host/route, or stack detail. The wire error envelope is built from a
 closed set of reason classes, never interpolated from a caller value or an
 internal cause.
 
+The exact forward cause IS surfaced — but to the OPERATOR diagnostic sink
+(stderr), never the caller. On a forward failure the handler logs the forward
+error (its fail-closed class, endpoint, path, and any control status) so a
+distroless container is diagnosable; the caller still receives only the stable
+`"forward refused"` class. That operator log is itself leak-free: it logs the
+forward ERROR only, which carries no credential or request body (the caller bearer
+and the service token are not part of the error and are not read there).
+
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant5_LeakFreeOutbound` — a realistically-wrapped forward error is
   not relayed; planting `ferr.Error()` into the response goes RED) and
   `internal/profile/validator_property_test.go`
   (`TestValidatorNeverPanicsAndDenyIsLeakFree` — for any input, a deny exposes
-  only a fixed, short reason-class string).
+  only a fixed, short reason-class string). The operator forward diagnostic:
+  `internal/ingress/forward_diag_test.go` (`TestForwardFailIsLogged` — a forward
+  failure logs its cause; removing the log goes RED; `TestForwardDiagIsLeakFree` —
+  the diagnostic never contains the caller bearer or an Authorization field;
+  `TestForwardSuccessLogsNothing` — a success is silent, the diag is failures-only).
 
 ## VI. The protocol revision is pinned per connection (NFR-IC-04)
 
