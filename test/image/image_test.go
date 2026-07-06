@@ -78,17 +78,24 @@ func inspect(t *testing.T, format string) string {
 	return strings.TrimSpace(out.String())
 }
 
-// TestImageHealthCheckReportsOK asserts the daemon's own -health-check self-probe
-// runs inside the image and reports readiness. The distroless image has no shell
-// or curl, so the binary is its own liveness probe (mirrors ocu-control).
-func TestImageHealthCheckReportsOK(t *testing.T) {
+// TestImageHealthCheckIsReadinessProbe asserts the image's -health-check is a
+// READINESS probe, not a bare liveness "ok": run in isolation (no serving daemon
+// bound at the probed address) it must exit NON-ZERO, because /healthz is
+// unreachable — the honest not-ready verdict a `depends_on: service_healthy` gate
+// needs. A liveness-only probe would fake-green here (exit 0 with no daemon at
+// all). The distroless image has no shell or curl, so the binary is its own probe
+// (mirrors ocu-control). The green path (a live daemon answering 200) is covered
+// in-process by cmd/ocu-mcp-gatewayd health-check tests and firsthand in the fleet.
+func TestImageHealthCheckIsReadinessProbe(t *testing.T) {
 	buildImage(t)
-	out, code := runInImage(t, "-health-check")
-	if code != 0 {
-		t.Fatalf("-health-check exited %d, want 0; output:\n%s", code, out)
+	// No daemon is serving inside this throwaway container, so the probe's dial to
+	// /healthz is refused → a non-zero (unhealthy) exit.
+	out, code := runInImage(t, "-health-check", "-listen", "127.0.0.1:8080")
+	if code == 0 {
+		t.Fatalf("-health-check with no serving daemon exited 0 (fake-green liveness); a readiness probe must exit non-zero when /healthz is unreachable. output:\n%s", out)
 	}
-	if !strings.Contains(out, "ok") {
-		t.Fatalf("-health-check output %q does not contain readiness token \"ok\"", out)
+	if strings.Contains(strings.ToLower(out), "panic") {
+		t.Fatalf("-health-check panicked rather than returning a clean unhealthy verdict:\n%s", out)
 	}
 }
 

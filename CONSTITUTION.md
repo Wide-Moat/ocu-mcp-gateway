@@ -277,13 +277,22 @@ never a silent success; an authentication that does not explicitly succeed is a
 The Control-owned authentication material is loaded and ready **before** any
 listener binds; an unreadable boot-set is fail-closed — the daemon stays
 not-ready, binds nothing, and admits no request. The bind hook gates on
-readiness.
+readiness. That readiness is also surfaced OUTWARD, unauthenticated, at
+`/healthz`: the gate answers 200 iff `seq.Ready()` (boot-set loaded and the
+listener up) and 503 otherwise, and the daemon's own `-health-check` sub-command
+dials it over the SAME listen address, so a container `depends_on:
+service_healthy` becomes an honest readiness gate rather than a liveness-only
+start race.
 
 - **Enforcement:** `internal/boot/boot_test.go`
   (`TestSequencerNotReadyBeforeLoad`, `TestSequencerLoadFailureStaysNotReady`,
   `TestSequencerReadyAfterLoad`) and the composition root
   `cmd/ocu-mcp-gatewayd/main.go` (binds only after `seq.Ready()` and aborts on a
-  load failure before any `net.Listen`).
+  load failure before any `net.Listen`). The outward readiness gate is enforced by
+  `internal/ingress/readiness_test.go` (`TestHealthzReflectsReadiness`,
+  `TestHealthzIsUnauthenticated`, `TestNonHealthzRoutesToMCPHandler`) and the probe
+  by `cmd/ocu-mcp-gatewayd/healthcheck_test.go` (`TestHealthCheckProbeGreenOn200`,
+  `TestHealthCheckProbeRedOn503`, `TestHealthCheckProbeRedOnRefused`).
 
 ## X. The caller-auth wire format is ratified (ADR-0027, NFR-SEC-87 floor)
 
