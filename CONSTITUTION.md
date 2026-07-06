@@ -159,8 +159,13 @@ session-provisioning fields (`workload_trust_profile`, `mount_intent`,
 `ProvisioningPolicy` injected at construction — NEVER from the caller's tool-call
 body, so **a caller cannot provision its own session** (widen caps, escalate the
 trust profile, or open egress). The only caller-influenced value is the
-`session_hint`, and it is a HINT (NFR-SEC-43), sourced from the resolved,
-non-secret principal handle. Custody holds as a type fact on both directions: the
+`session_hint`, and it is a HINT (NFR-SEC-43), keyed on the resolved non-secret
+Tenant handle AND the per-chat scope (the `X-Chat-Id` TRANSPORT header, never the
+JSON body — invariant #2), so each chat's tool-calls reuse one guest session
+(control resumes it) instead of colliding on a per-tenant reservation; with no chat
+scope it falls back to the tenant handle. It remains a hint, never the session_id
+authority (that is host-derived from the mTLS SAN). Custody holds as a type fact on
+both directions: the
 mapped shapes have no field for the minted Storage-JWT / filestore credential
 (`MountIntent` omits the auth token). The `image` ref is PIN-PENDING at the
 gatekeeper (`reserved 6`/`"image"`, #205 / issue #3) and is left UNSET on the wire

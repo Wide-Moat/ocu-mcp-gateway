@@ -212,14 +212,22 @@ func buildCreateRequest(policy ProvisioningPolicy, sessionHint string) CreateReq
 	}
 }
 
-// sessionHintFor derives the session hint from the resolved caller principal. It
-// uses the caller Tenant — a NON-SECRET, host-attested handle the auth seam
-// produced, never the caller's raw credential (auth.Caller has no credential
-// field). The value is a HINT the host may seed a derived binding from, never the
-// authority for the session_id binding (NFR-SEC-43); a foreign hint cannot bind
-// another tenant's session. It is the ONLY caller-influenced value on the create.
-func sessionHintFor(principal auth.Caller) string {
-	return principal.Tenant
+// sessionHintFor derives the session hint from the resolved caller principal AND
+// the per-request chat scope. The Tenant is a NON-SECRET, host-attested handle the
+// auth seam produced (never the raw credential). The chatScope is the caller's
+// per-chat handle (the X-Chat-Id transport header) so each chat gets its OWN stable
+// hint: control's deterministic mintHandle then reserves one session per (tenant,
+// chat) instead of one per tenant — the tool-calls of a chat REUSE one guest
+// session, and a second chat does not collide (the per-tenant 409). With no chat
+// scope the hint falls back to the tenant handle (the prior behaviour, a safe
+// default). The value is a HINT the host may seed a binding from, never the
+// authority for the session_id (NFR-SEC-43); a foreign hint cannot bind another
+// tenant's session.
+func sessionHintFor(principal auth.Caller, chatScope string) string {
+	if chatScope == "" {
+		return principal.Tenant
+	}
+	return principal.Tenant + "/" + chatScope
 }
 
 // validate enforces the fail-closed admission checks the gateway can make before

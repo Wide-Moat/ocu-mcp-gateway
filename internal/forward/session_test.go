@@ -54,12 +54,17 @@ func TestProvisioningComesFromPolicyNotBody(t *testing.T) {
 	}
 }
 
-// TestSessionHintIsCallerTenantOnly proves the hint is the caller principal's
-// non-secret Tenant handle — never a credential, never an authority.
+// TestSessionHintIsCallerTenantOnly proves that with NO chat scope the hint is the
+// caller principal's non-secret Tenant handle — never a credential, never an
+// authority. With a chat scope it is keyed per-chat (see session_hint_test.go).
 func TestSessionHintIsCallerTenantOnly(t *testing.T) {
-	got := sessionHintFor(auth.Caller{KeyID: "k9", Tenant: "tenant-b", Deployment: "deploy-x"})
+	got := sessionHintFor(auth.Caller{KeyID: "k9", Tenant: "tenant-b", Deployment: "deploy-x"}, "")
 	if got != "tenant-b" {
-		t.Errorf("session hint must be the caller Tenant handle, got %q", got)
+		t.Errorf("session hint with no chat scope must be the caller Tenant handle, got %q", got)
+	}
+	scoped := sessionHintFor(auth.Caller{Tenant: "tenant-b"}, "chat-7")
+	if scoped == "tenant-b" || scoped == "" {
+		t.Errorf("session hint WITH a chat scope must differ from the bare tenant, got %q", scoped)
 	}
 }
 

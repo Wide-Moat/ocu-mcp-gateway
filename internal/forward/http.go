@@ -209,7 +209,7 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 		// profile, mount, or egress. The ONLY caller-influenced value is the session
 		// HINT, sourced from the resolved principal (a non-secret handle); it is a
 		// hint the host may seed a binding from, never the authority (NFR-SEC-43).
-		create := buildCreateRequest(f.provisioning, sessionHintFor(req.Principal))
+		create := buildCreateRequest(f.provisioning, sessionHintFor(req.Principal, req.SessionHint))
 		if err := create.validate(); err != nil {
 			// Fail-closed admission: an inadmissible create is refused before any
 			// round-trip (unspecified profile, bad mount scope, unset pids cap).
