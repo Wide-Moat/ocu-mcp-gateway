@@ -30,24 +30,50 @@ const (
 )
 
 // createBodyWire is the EXACT JSON shape the Control gateway-ingress createBody
-// decodes (ocu-control serve.go), decoded there with DisallowUnknownFields. The
-// gateway sends ONLY these three fields; sending a richer body (mount_intent,
-// egress, caps) would be rejected 400 by the unknown-field guard until Control
-// widens createBody (a coordinated follow-up, G1b). The rich frozen-proto
-// CreateRequest still drives the IN-GATEWAY admission build+validate before the
-// forward; only the wire projection is these three fields.
+// decodes (ocu-control serve.go:300), decoded there with DisallowUnknownFields:
+// session_hint, image, and the deployment-sourced mount_intent + egress_policy.
+// The rich frozen-proto CreateRequest still drives the IN-GATEWAY admission
+// build+validate before the forward; this is the wire PROJECTION of it.
 //
 //   - session_hint: the caller-derived hint (the resolved Tenant), never authority
 //     (NFR-SEC-43). Control derives the real session_id from the mTLS SAN.
-//   - image: empty on a bare G3 create — the sandbox image ref is PIN-PENDING at
-//     the gatekeeper (#205 reconciliation); the gateway does not invent it.
-//   - control_pub_key: empty on a bare G3 create — the raw Ed25519 public key is
-//     staged for the exec channel, which Control drives (ADR-0024, the G2 exec-
-//     driver); the gateway does not generate the key pair.
+//   - image: empty on a bare create — the sandbox image ref is PIN-PENDING at the
+//     gatekeeper (#205 reconciliation); the gateway does not invent it.
+//   - mount_intent / egress_policy: projected STRICTLY from the deployment
+//     provisioning (f.provisioning, F5 ruling A — never a caller body). Control
+//     needs egress_policy (default_deny) to materialize; without it materialize is
+//     refused. mount_intent is a pointer so an ABSENT scope omits it (Control
+//     treats a PRESENT mount as requiring exactly one filesystem_id XOR
+//     memory_store_id; an ABSENT mount is the legitimate no-scope session,
+//     ADR-0017).
+//
+// There is deliberately NO control_pub_key: Control's createBody has no such field
+// and rejects it as unknown (a 400 on the live control — this was the F5 502 root).
+// The exec channel (G2, ADR-0024) will be a future ADDITIVE field Control adds,
+// not one the gateway smuggles onto a create body Control does not accept.
 type createBodyWire struct {
-	SessionHint   string `json:"session_hint"`
-	Image         string `json:"image"`
-	ControlPubKey []byte `json:"control_pub_key"`
+	SessionHint  string            `json:"session_hint"`
+	Image        string            `json:"image"`
+	MountIntent  *mountIntentWire  `json:"mount_intent,omitempty"`
+	EgressPolicy *egressPolicyWire `json:"egress_policy,omitempty"`
+}
+
+// mountIntentWire / egressPolicyWire are the wire projections of the deployment
+// MountIntent / EgressPolicy, field names matching Control's mountIntentBody /
+// egressPolicyBody exactly. They carry NO credential (custody: the Storage-JWT
+// rides the F7 mount-config push, never a create body).
+type mountIntentWire struct {
+	Destination    string `json:"destination"`
+	FilesystemID   string `json:"filesystem_id"`
+	MemoryStoreID  string `json:"memory_store_id"`
+	ReadOnly       bool   `json:"read_only"`
+	CacheDurationS uint32 `json:"cache_duration_s"`
+}
+
+type egressPolicyWire struct {
+	DefaultDeny     bool   `json:"default_deny"`
+	AllowedUpstream string `json:"allowed_upstream"`
+	FilesystemID    string `json:"filesystem_id"`
 }
 
 // destroyBodyWire is the Control gateway-ingress destroy body: a session hint that
@@ -91,8 +117,9 @@ type ServiceIdentity struct {
 // or the create admission is absent/invalid. The SESSION-REQUEST WIRE FIELDS are
 // NOT invented: the FIELD SEMANTICS come from the frozen Control session-setup proto
 // (session_setup.proto, PR #293), and the JSON wire projection is exactly the shape
-// Control's gateway-ingress createBody decodes (session_hint, image, control_pub_key).
-// The security properties (mTLS-only, service-credential-only, no caller credential,
+// Control's gateway-ingress createBody decodes (session_hint, image, mount_intent,
+// egress_policy — the mount/egress projected from deployment provisioning). The
+// security properties (mTLS-only, service-credential-only, no caller credential,
 // fail-closed) are enforced on every path.
 type ControlForwarder struct {
 	identity ServiceIdentity
@@ -189,14 +216,19 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 			return SessionResponse{}, err
 		}
 
-		// The JSON wire projection is EXACTLY the three fields Control's createBody
-		// decodes (DisallowUnknownFields). The rich provisioning fields built+validated
-		// above are an IN-GATEWAY admission gate; the wire carries only the hint
-		// (image / control_pub_key are empty on a bare G3 create — PIN-PENDING / G2).
-		// A caller credential appears nowhere: the body has no field for it, and the
-		// service principal is asserted by the mTLS client cert + the bearer token,
-		// never the caller's key.
-		wire := createBodyWire{SessionHint: create.SessionHint}
+		// The JSON wire projection is EXACTLY the fields Control's createBody decodes
+		// (DisallowUnknownFields): session_hint + image + the mount_intent and
+		// egress_policy PROJECTED from the deployment provisioning (Control needs
+		// egress_policy to materialize). These come from `create` (built strictly
+		// from f.provisioning), never a caller body — F5 ruling A holds. A caller
+		// credential appears nowhere: the body has no field for it, and the service
+		// principal is asserted by the mTLS client cert + the bearer token, never the
+		// caller's key.
+		wire := createBodyWire{
+			SessionHint:  create.SessionHint,
+			EgressPolicy: egressWireFrom(create.EgressPolicy),
+			MountIntent:  mountWireFrom(create.MountIntent),
+		}
 		respBody, err := f.postJSON(ctx, token, createPath, wire)
 		if err != nil {
 			return SessionResponse{}, err
@@ -322,4 +354,32 @@ func (f *ControlForwarder) Destroy(ctx context.Context, sessionHint string) erro
 		return err
 	}
 	return nil
+}
+
+// egressWireFrom projects the deployment EgressPolicy onto the wire. Control needs
+// the egress_policy (default_deny) to materialize a session, so it is always sent.
+func egressWireFrom(e EgressPolicy) *egressPolicyWire {
+	return &egressPolicyWire{
+		DefaultDeny:     e.DefaultDeny,
+		AllowedUpstream: e.AllowedUpstream,
+		FilesystemID:    e.FilesystemID,
+	}
+}
+
+// mountWireFrom projects the deployment MountIntent onto the wire ONLY when it
+// names a scope. Control treats a PRESENT mount_intent as requiring exactly one
+// filesystem_id XOR memory_store_id; a scope-less mount is the legitimate no-scope
+// (compute/exec) session, which is expressed by OMITTING mount_intent (ADR-0017),
+// not by sending an empty one (which Control would reject as "neither scope").
+func mountWireFrom(m MountIntent) *mountIntentWire {
+	if m.FilesystemID == "" && m.MemoryStoreID == "" {
+		return nil
+	}
+	return &mountIntentWire{
+		Destination:    m.Destination,
+		FilesystemID:   m.FilesystemID,
+		MemoryStoreID:  m.MemoryStoreID,
+		ReadOnly:       m.ReadOnly,
+		CacheDurationS: m.CacheDurationS,
+	}
 }
