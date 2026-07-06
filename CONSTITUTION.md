@@ -324,6 +324,14 @@ dials it over the SAME listen address, so a container `depends_on:
 service_healthy` becomes an honest readiness gate rather than a liveness-only
 start race.
 
+A separate `/health` path is the LIVENESS preflight the MCP client probes before
+`initialize` (the upstream monolith served `GET /health` -> `{"status":"healthy"}`,
+so a drop-in gateway must answer it with no tool-code change). It is UNCONDITIONAL
+(200 whenever the process is up, unlike `/healthz` which gates on readiness) and
+unauthenticated, and it surfaces only a static status token — no tool list, no
+server version, no boot state — so it is not a reconnaissance surface. Like
+`/healthz` it is served gateway-local and never forwarded.
+
 - **Enforcement:** `internal/boot/boot_test.go`
   (`TestSequencerNotReadyBeforeLoad`, `TestSequencerLoadFailureStaysNotReady`,
   `TestSequencerReadyAfterLoad`) and the composition root
@@ -332,7 +340,13 @@ start race.
   `internal/ingress/readiness_test.go` (`TestHealthzReflectsReadiness`,
   `TestHealthzIsUnauthenticated`, `TestNonHealthzRoutesToMCPHandler`) and the probe
   by `cmd/ocu-mcp-gatewayd/healthcheck_test.go` (`TestHealthCheckProbeGreenOn200`,
-  `TestHealthCheckProbeRedOn503`, `TestHealthCheckProbeRedOnRefused`).
+  `TestHealthCheckProbeRedOn503`, `TestHealthCheckProbeRedOnRefused`). The `/health`
+  liveness preflight is enforced by `internal/ingress/health_test.go`
+  (`TestHealthIsLivenessAlways200` — 200 `{"status":"healthy"}` even when NOT ready,
+  distinct from readiness; `TestHealthIsUnauthenticated` — no key needed, never
+  routed to the MCP handler; `TestHealthzStillReadiness` — adding `/health` did not
+  turn `/healthz` into liveness; removing the `/health` branch reds the liveness
+  test).
 
 ## X. The caller-auth wire format is ratified (ADR-0027, NFR-SEC-87 floor)
 

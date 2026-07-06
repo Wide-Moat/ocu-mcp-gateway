@@ -10,6 +10,12 @@ import "net/http"
 // make readiness unprobeable. It carries no session data and mutates nothing.
 const healthzPath = "/healthz"
 
+// healthPath is the LIVENESS preflight path the MCP client probes before
+// initialize (the upstream monolith served GET /health -> {"status":"healthy"}).
+// It is unconditional liveness (not readiness) and unauthenticated, so a drop-in
+// gateway answers the client's preflight with no tool-code change.
+const healthPath = "/health"
+
 // ReadinessMux wraps the authenticating MCP handler with an unauthenticated
 // /healthz readiness gate. Every path other than /healthz falls through to the
 // wrapped handler unchanged, so the tool-call surface is untouched; /healthz
@@ -38,6 +44,21 @@ func NewReadinessMux(mcp http.Handler, ready func() bool) *ReadinessMux {
 // ServeHTTP serves /healthz from the readiness predicate and routes everything
 // else to the wrapped MCP handler.
 func (m *ReadinessMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == healthPath {
+		// LIVENESS preflight — the upstream monolith served GET /health ->
+		// {"status":"healthy"}, and the MCP client (e.g. the OpenWebUI tool) probes
+		// it FIRST, before initialize. It is UNCONDITIONAL (the process is up, so it
+		// answers 200 even before the boot-set loads — that is liveness, not
+		// readiness) and UNAUTHENTICATED (the preflight carries no key). It surfaces
+		// only a static status token: no tool list, no server version, no boot state,
+		// so it is not a reconnaissance surface. Served gateway-local, never
+		// forwarded. A drop-in gateway must answer it so the client's preflight
+		// passes with no tool-code change.
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"healthy"}` + "\n"))
+		return
+	}
 	if r.URL.Path == healthzPath {
 		if m.ready() {
 			w.WriteHeader(http.StatusOK)
