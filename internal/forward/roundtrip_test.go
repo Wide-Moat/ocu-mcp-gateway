@@ -147,13 +147,34 @@ func (p *mTLSTestPKI) serverTLSConfig() *tls.Config {
 	}
 }
 
-// controlCreateBody mirrors ocu-control's gateway-ingress createBody (serve.go):
-// the ONLY three fields the JSON create wire carries, decoded with
-// DisallowUnknownFields on the control side. The gateway must send exactly these.
+// controlCreateBody mirrors ocu-control's gateway-ingress createBody (serve.go:300):
+// the fields the JSON create wire carries, decoded with DisallowUnknownFields on
+// the control side. control accepts {session_hint, image, mount_intent,
+// egress_policy} and NO control_pub_key (that field was refused on the live
+// control — DisallowUnknownFields 400 — and does not exist in createBody). The
+// gateway must send exactly these and project mount/egress from its deployment
+// provisioning so control can materialize.
 type controlCreateBody struct {
-	SessionHint   string `json:"session_hint"`
-	Image         string `json:"image"`
-	ControlPubKey []byte `json:"control_pub_key"`
+	SessionHint  string             `json:"session_hint"`
+	Image        string             `json:"image"`
+	MountIntent  *controlMountBody  `json:"mount_intent"`
+	EgressPolicy *controlEgressBody `json:"egress_policy"`
+}
+
+// controlMountBody / controlEgressBody mirror control's mountIntentBody /
+// egressPolicyBody field names exactly (serve.go).
+type controlMountBody struct {
+	Destination    string `json:"destination"`
+	FilesystemID   string `json:"filesystem_id"`
+	MemoryStoreID  string `json:"memory_store_id"`
+	ReadOnly       bool   `json:"read_only"`
+	CacheDurationS uint32 `json:"cache_duration_s"`
+}
+
+type controlEgressBody struct {
+	DefaultDeny     bool   `json:"default_deny"`
+	AllowedUpstream string `json:"allowed_upstream"`
+	FilesystemID    string `json:"filesystem_id"`
 }
 
 // controlSessionResponse mirrors ocu-control's sessionResponse: the host-derived
@@ -163,13 +184,15 @@ type controlSessionResponse struct {
 	State int    `json:"state"`
 }
 
-// TestForwardLiveRoundTrip is the G3 keystone: the gateway performs a LIVE F5
-// create over mTLS against a control-shaped httptest server and maps the reply.
-// It proves the real wire, not a stub: a JSON POST to /v1alpha/sessions carrying
-// EXACTLY {session_hint, image, control_pub_key} over a verified mTLS handshake,
+// TestForwardLiveRoundTrip is the F5 keystone: the gateway performs a LIVE create
+// over mTLS against a control-shaped httptest server and maps the reply. It proves
+// the real wire, not a stub: a JSON POST to /v1alpha/sessions carrying EXACTLY
+// {session_hint, image, mount_intent, egress_policy} (mount/egress projected from
+// the deployment provisioning, NO control_pub_key) over a verified mTLS handshake,
 // the service credential presented, and the 201 {key,state} reply mapped into a
-// SessionResponse. RED until Forward stops returning the "round-trip pending"
-// fail-closed stub.
+// SessionResponse. The control-mock decodes with DisallowUnknownFields, so a
+// control_pub_key or any over-rich field reds the test — pinning the wire to what
+// the live control actually accepts.
 func TestForwardLiveRoundTrip(t *testing.T) {
 	pki := newMTLSTestPKI(t)
 
@@ -234,13 +257,28 @@ func TestForwardLiveRoundTrip(t *testing.T) {
 	if gotBody.SessionHint != "tenant-a" {
 		t.Errorf("session_hint must be the caller Tenant handle, got %q", gotBody.SessionHint)
 	}
-	// image and control_pub_key are empty on a bare G3 create (PIN-PENDING / exec is
-	// G2): the gateway must NOT invent them.
+	// image is empty on a bare create (PIN-PENDING #205): the gateway must NOT
+	// invent it.
 	if gotBody.Image != "" {
-		t.Errorf("bare G3 create must send empty image (PIN-PENDING #205), got %q", gotBody.Image)
+		t.Errorf("bare create must send empty image (PIN-PENDING #205), got %q", gotBody.Image)
 	}
-	if len(gotBody.ControlPubKey) != 0 {
-		t.Errorf("bare G3 create must send empty control_pub_key (exec is G2), got %d bytes", len(gotBody.ControlPubKey))
+	// The egress_policy MUST be projected from the deployment provisioning so
+	// control can materialize (control needs default_deny). It comes from
+	// f.provisioning, never a caller body (F5 ruling A).
+	if gotBody.EgressPolicy == nil {
+		t.Fatal("the F5 create must project egress_policy from provisioning (control needs it to materialize); got none")
+	}
+	if !gotBody.EgressPolicy.DefaultDeny {
+		t.Errorf("egress_policy.default_deny must be projected true from provisioning, got false")
+	}
+	// The mount_intent is projected when the provisioning names a scope (control
+	// requires exactly one filesystem_id XOR memory_store_id for a PRESENT mount).
+	if gotBody.MountIntent != nil {
+		hasFS := gotBody.MountIntent.FilesystemID != ""
+		hasMem := gotBody.MountIntent.MemoryStoreID != ""
+		if hasFS == hasMem {
+			t.Errorf("a PRESENT mount_intent must name exactly one scope (filesystem_id XOR memory_store_id), got fs=%q mem=%q", gotBody.MountIntent.FilesystemID, gotBody.MountIntent.MemoryStoreID)
+		}
 	}
 
 	// The reply is mapped into a SessionResponse. The host-derived key is surfaced

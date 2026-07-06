@@ -120,8 +120,8 @@ gRPC surface named in 08-contracts §1 is a future follow-up Control itself decl
 The FIELD SEMANTICS are NOT invented in this repo: they are the frozen Control
 session-setup schema (`session_setup.proto`, PR #293), vendored byte-identical (see
 `VENDORED.md`) and hand-mapped into the seam (`internal/forward/session.go`); the
-JSON wire projection is exactly the three fields Control's `createBody` decodes
-(`session_hint`, `image`, `control_pub_key`).
+JSON wire projection is exactly the fields Control's `createBody` decodes
+(`session_hint`, `image`, `mount_intent`, `egress_policy`).
 
 The F5 create is **stateless create-per-forward** (architect ruling A). The
 session-provisioning fields (`workload_trust_profile`, `mount_intent`,
@@ -134,11 +134,18 @@ non-secret principal handle. Custody holds as a type fact on both directions: th
 mapped shapes have no field for the minted Storage-JWT / filestore credential
 (`MountIntent` omits the auth token). The `image` ref is PIN-PENDING at the
 gatekeeper (`reserved 6`/`"image"`, #205 / issue #3) and is left UNSET on the wire
-(empty), never invented nor silently dropped; `control_pub_key` is likewise empty on
-a bare create (the Ed25519 key is staged for the exec channel Control drives — the G2
-exec-driver, ADR-0024). The create round-trip is LIVE: the dial builds and validates
-an admissible create (fail-closed on an unspecified profile, an ill-formed mount
-scope, or an unset pids cap), projects it to the JSON wire body, POSTs it over the
+(empty), never invented nor silently dropped. The `mount_intent` and `egress_policy`
+ARE projected onto the wire from the deployment provisioning (Control needs the
+`egress_policy` to materialize a session); `mount_intent` is omitted when no scope
+is set (Control treats a PRESENT mount as requiring exactly one scope, an ABSENT
+mount is the legitimate no-scope session, ADR-0017). There is NO `control_pub_key`
+on the wire: Control's `createBody` has no such field and refuses it as unknown (a
+400 — this was the live F5 502 root cause); the Ed25519 exec-channel key will be a
+future ADDITIVE field Control adds (the G2 exec-driver, ADR-0024), not one the
+gateway smuggles onto a body Control does not accept. The create round-trip is LIVE:
+the dial builds and validates an admissible create (fail-closed on an unspecified
+profile, an ill-formed mount scope, or an unset pids cap), projects it to the JSON
+wire body, POSTs it over the
 hardened mTLS transport, and maps the reply — failing closed on a transport error or
 a non-2xx (never a fabricated success). `Destroy` is LIVE too (`POST
 /v1alpha/sessions/destroy`, the cooperative teardown, never the operator force-kill).
@@ -170,8 +177,11 @@ rather than fabricate.
   `TestDestroyFailsClosedWithoutTransport` — live Destroy fails closed with no
   transport). The LIVE F5 round-trip: `internal/forward/roundtrip_test.go`
   (`TestForwardLiveRoundTrip` — a create POSTs exactly `{session_hint, image,
-  control_pub_key}` over a verified mTLS handshake and maps the 201 `{key,state}`
-  reply into a `SessionResponse` correlation; `TestForwardDoesNotLeakCallerCredential`
+  mount_intent, egress_policy}` (mount/egress projected from provisioning, NO
+  `control_pub_key`) over a verified mTLS handshake, the control-mock decodes with
+  DisallowUnknownFields so an over-rich or `control_pub_key`-bearing body reds it,
+  and it maps the 201 `{key,state}` reply into a `SessionResponse` correlation;
+  `TestForwardDoesNotLeakCallerCredential`
   — no caller `sk-ocu-` key rides F5 in header or body;
   `TestForwardFailsClosedOnControlError` / `TestDestroyFailsClosedOnControlError` — a
   non-2xx control reply is a fail-closed refusal, never a fabricated success;
