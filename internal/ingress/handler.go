@@ -220,6 +220,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// validated tool-call; the caller bearer is not reachable from it.
 	resp, ferr := h.forwarder.Forward(r.Context(), req)
 	if ferr != nil {
+		// Operator diagnostic: log the EXACT forward error (fail-closed class +
+		// endpoint + path + control status) so a distroless container surfaces WHY
+		// the 502 happened. The forward error carries no credential or body, so the
+		// log is actionable without leaking. The caller-facing response below stays
+		// leak-free regardless.
+		logForwardFailure(ferr, boundedResource(req.ToolCall.Name))
 		// Fail-closed: a forward failure is a refusal, leak-free. It is a
 		// terminated request with a validated identity, so it is recorded (§XI)
 		// durable-first before the 502 — symmetric to the success emit.
