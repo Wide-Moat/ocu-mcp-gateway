@@ -145,6 +145,26 @@ jobs:
           exit-code: "1"
           ignore-unfixed: "false"
 
+  sca-trivy-image:
+    # Scan the SHIPPED container image, not just the source tree: a CVE can enter
+    # through the distroless base layer or the compiled Go binary that a filesystem
+    # scan of the repo does not see. The image is built from the repo Dockerfile
+    # (both bases digest-pinned) and scanned at the same CRITICAL,HIGH floor as the
+    # filesystem gate, so a vulnerable base bump reds the merge.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: build the image
+        run: docker build -t ocu-mcp-gateway:scan .
+      - name: trivy image — CRITICAL+HIGH blocks
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ocu-mcp-gateway:scan
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: "false"
+
   iac-policy:
     # Invariant #4 NETWORK half (NFR-SEC-52): the rendered deploy manifests grant
     # the gateway NO network route to the operator ingress on either shelf. The

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Standalone image smoke for the MCP gateway (component-01) — the repo-local
+# counterpart to a component's own CI smoke, NOT the fleet assembly. It BUILDS the
+# image from this repo's Dockerfile and proves the shipped artifact's real,
+# zero-mock behaviour: the binary starts, its -health-check self-probe reports
+# ready, and an unconfigured boot fails closed naming the missing flag. There is
+# deliberately NO stub Control here: standing up a fake that answers 201 would be
+# a mock, and the full keyed create hop (caller -> gateway -> control -> guest) is
+# proven firsthand against the REAL Control in the fleet assembly
+# (deploy/fleet/docker-compose.fleet.yml), not here.
+#
+# This file is intentionally NOT the IaC-policy topology (that is
+# docker-compose.yaml, parsed by scripts/iac_policy_check.py for the invariant #4
+# network split). It carries no networks and no operator surface; it only exercises
+# the image.
+#
+# Usage:
+#   docker compose -f deploy/compose/docker-compose.smoke.yaml run --rm gateway-health
+#     -> prints "ok", exits 0 (the daemon's own liveness self-probe).
+#   docker compose -f deploy/compose/docker-compose.smoke.yaml run --rm gateway-bootfail
+#     -> exits non-zero naming "-boot-set ... fail-closed" (never a silent start).
+services:
+  # Health self-probe: the distroless image has no shell or curl, so the daemon
+  # binary is its own liveness probe. Real binary, real exit code, zero mocks.
+  gateway-health:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ocu-mcp-gateway:smoke
+    command: ["-health-check"]
+
+  # Fail-closed boot: run the daemon with NO configuration. It must refuse to
+  # start and name the first missing required flag (-boot-set), proving the
+  # shipped image never silently starts an unconfigured gateway (invariant #9).
+  # This reuses the image the health service builds.
+  gateway-bootfail:
+    image: ocu-mcp-gateway:smoke
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: []
