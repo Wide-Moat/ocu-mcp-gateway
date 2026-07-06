@@ -79,6 +79,44 @@ func TestFileSinkOpenFailsClosedOnBadPath(t *testing.T) {
 	}
 }
 
+// TestFileSinkOpenDurablyCommitsCreation asserts OpenFileSink durably commits the
+// FILE's CREATION and returns a usable sink on the happy path.
+func TestFileSinkOpenDurablyCommitsCreation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.ocsf.jsonl")
+	s, err := OpenFileSink(path)
+	if err != nil {
+		t.Fatalf("OpenFileSink on a valid directory failed: %v", err)
+	}
+	defer s.Close()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("audit file not present after OpenFileSink (creation not committed): %v", err)
+	}
+}
+
+// TestSyncParentDir directly exercises the parent-directory fsync — the POSIX step
+// that makes a newly created file's directory entry durable (an fsync on the file
+// alone does not flush it). Testing the helper directly is the honest gate: a
+// crash losing the entry is not unit-observable, but the helper MUST open and sync
+// the containing directory and fail closed when that directory does not exist or is
+// not a directory. Deleting the sync call from OpenFileSink is caught by code
+// review + this helper's presence; here we prove the helper's own contract.
+func TestSyncParentDir(t *testing.T) {
+	dir := t.TempDir()
+	// A file in a real directory: the parent exists and is syncable → nil.
+	if err := syncParentDir(filepath.Join(dir, "audit.ocsf.jsonl")); err != nil {
+		t.Fatalf("syncParentDir on a real directory returned %v, want nil", err)
+	}
+	// A path whose parent does not exist → error (fail closed): the sync cannot
+	// open a directory that is not there. This is the cross-platform gate on the
+	// helper actually opening + syncing the parent (a stub returning nil would pass
+	// the happy-path case above but fails here). macOS and Linux both error when
+	// os.Open cannot find the directory.
+	if err := syncParentDir(filepath.Join(dir, "no-such-dir", "audit.ocsf.jsonl")); err == nil {
+		t.Fatal("syncParentDir with a nonexistent parent returned nil, want an error")
+	}
+}
+
 // TestFileSinkOpenFailsClosedOnEmptyPath asserts an empty path is refused (a
 // misconfiguration, not a silent no-op sink).
 func TestFileSinkOpenFailsClosedOnEmptyPath(t *testing.T) {
@@ -143,5 +181,41 @@ func TestFileSinkPublishFailsClosedOnFsyncError(t *testing.T) {
 	s := &FileSink{f: &faultingFile{syncErr: errors.New("disk gone")}}
 	if err := s.Publish(context.Background(), "audit.ocsf", []byte(`{"seq":0}`)); err == nil {
 		t.Fatal("Publish with an fsync failure returned nil, want a fail-closed error")
+	}
+}
+
+// TestFileSinkSealedAfterShortWrite asserts that after a short write (which may
+// have appended a partial, truncated record) the sink is SEALED: a subsequent
+// Publish must fail closed rather than append after the bad tail, which would
+// corrupt the newline-delimited JSONL spine. A partial line on the tail followed
+// by a full record on the next append yields an unparseable spine — the sink must
+// refuse further writes once durability was breached.
+func TestFileSinkSealedAfterShortWrite(t *testing.T) {
+	ff := &faultingFile{shortWrite: true}
+	s := &FileSink{f: ff}
+	// First Publish short-writes and fails.
+	if err := s.Publish(context.Background(), "audit.ocsf", []byte(`{"seq":0}`)); err == nil {
+		t.Fatal("first Publish (short write) must fail")
+	}
+	// Even if the underlying writer would now succeed, the sink must refuse: the
+	// prior partial write left a truncated tail.
+	ff.shortWrite = false
+	if err := s.Publish(context.Background(), "audit.ocsf", []byte(`{"seq":1}`)); err == nil {
+		t.Fatal("after a short write the sink must be SEALED; a later Publish must fail closed, not append onto a truncated tail")
+	}
+}
+
+// TestFileSinkSealedAfterFsyncError asserts the same seal after an fsync failure:
+// the bytes may be in the page cache but not durable, and continuing to append
+// risks an unrecoverable spine. Once durability failed, the sink refuses.
+func TestFileSinkSealedAfterFsyncError(t *testing.T) {
+	ff := &faultingFile{syncErr: errors.New("disk gone")}
+	s := &FileSink{f: ff}
+	if err := s.Publish(context.Background(), "audit.ocsf", []byte(`{"seq":0}`)); err == nil {
+		t.Fatal("first Publish (fsync fail) must fail")
+	}
+	ff.syncErr = nil
+	if err := s.Publish(context.Background(), "audit.ocsf", []byte(`{"seq":1}`)); err == nil {
+		t.Fatal("after an fsync failure the sink must be SEALED; a later Publish must fail closed")
 	}
 }

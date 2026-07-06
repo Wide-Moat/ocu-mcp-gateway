@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -72,7 +73,31 @@ func OpenFileSink(path string) (*FileSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: open file sink %q: %w", path, err)
 	}
+	// Durably commit the FILE's CREATION by fsyncing the PARENT DIRECTORY. An fsync
+	// on the file alone does not flush the directory entry (POSIX), so a crash
+	// right after create could lose a brand-new audit file — an unacceptable gap
+	// for the durable-first audit spine (NFR-SEC-03). A restart re-opens an
+	// existing file, where this is a no-op, but the first create is made durable.
+	// If the parent cannot be synced the sink is refused at construction (fail
+	// closed), and the just-opened file is closed so it is not leaked.
+	if err := syncParentDir(path); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("audit: fsync parent dir of file sink %q: %w", path, err)
+	}
 	return &FileSink{f: f}, nil
+}
+
+// syncParentDir fsyncs the directory that contains path, so a newly created file's
+// directory entry is durably on stable storage. It is a POSIX requirement that a
+// file-level fsync does not cover; ext4/xfs may handle it implicitly, but relying
+// on that is not portable or crash-safe.
+func syncParentDir(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // Publish appends payload as one newline-delimited JSON line and fsyncs the file
@@ -100,14 +125,24 @@ func (s *FileSink) Publish(ctx context.Context, channel string, payload []byte) 
 
 	n, err := s.f.Write(line)
 	if err != nil {
+		// A write error may have appended a partial record; SEAL the sink so no
+		// later Publish appends after a truncated tail (which would corrupt the
+		// JSONL spine). Every subsequent Publish then fails closed.
+		s.closed = true
 		return fmt.Errorf("audit: append to file sink (channel %q): %w", channel, err)
 	}
 	if n != len(line) {
-		// A short write did not durably commit the whole record — fail closed.
+		// A short write left a truncated record on the tail. SEAL the sink: a later
+		// append after a partial line yields an unparseable spine, so no further
+		// write is permitted once durability was breached.
+		s.closed = true
 		return fmt.Errorf("audit: short write to file sink (channel %q): wrote %d of %d bytes", channel, n, len(line))
 	}
 	if err := s.f.Sync(); err != nil {
-		// The bytes are not on stable storage until fsync confirms — fail closed.
+		// The bytes are not confirmed on stable storage. SEAL the sink: continuing
+		// to append past an unconfirmed record risks an unrecoverable spine. Fail
+		// closed here and on every subsequent Publish.
+		s.closed = true
 		return fmt.Errorf("audit: fsync file sink (channel %q): %w", channel, err)
 	}
 	return nil
