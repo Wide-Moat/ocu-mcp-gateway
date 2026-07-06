@@ -23,10 +23,15 @@ import (
 // never be called. Deleting the allowlist guard makes this test RED (the request
 // reaches the forward and returns 502/200 instead of the method deny).
 func TestUnknownMethodNotForwarded(t *testing.T) {
+	// initialize and tools/list are NO LONGER off-surface: the gateway grew the MCP
+	// handshake and answers them gateway-local (see handshake_test.go — they return
+	// 200 and never reach the forwarder). What remains off-surface is a genuinely
+	// unimplemented method: an invented hostile one, or a real MCP method the gateway
+	// does not front. Those must still be denied -32601 and never forwarded.
 	cases := map[string]string{
-		"invented hostile method": `{"jsonrpc":"2.0","id":1,"method":"evil/pwn","params":{"name":"echo","arguments":{}}}`,
-		"real off-surface method": `{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{"name":"echo","arguments":{}}}`,
-		"client-side handshake":   `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"echo","arguments":{}}}`,
+		"invented hostile method":      `{"jsonrpc":"2.0","id":1,"method":"evil/pwn","params":{"name":"echo","arguments":{}}}`,
+		"real off-surface method":      `{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{"name":"echo","arguments":{}}}`,
+		"unimplemented lifecycle call": `{"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}`,
 	}
 	for name, reqBody := range cases {
 		t.Run(name, func(t *testing.T) {
