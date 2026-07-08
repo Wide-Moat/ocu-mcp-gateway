@@ -63,6 +63,16 @@ allowlist deny. The allowlist / handshake set is named and extensible: a new
 inbound method is a one-line add plus its own local-answer-or-forward decision and
 test, never a rewrite.
 
+`tools/list` advertises ONLY the tools the gateway can actually serve end-to-end.
+Advertising a tool the gateway cannot serve (one with no gateway argv projection, so
+its `tools/call` reaches the create-only path and executes nothing) is worse than
+omitting it: the client will call it and the response has no result to relay. Today
+the only end-to-end tool is `bash_tool`, so it is the only advertised tool; the file
+operations (`create_file`, `view`, `str_replace`) are re-advertised in the SAME
+change that gives each a working projection, never before. `sub_agent` is a PERMANENT
+non-goal — the OCU fleet does not run the agent loop (MANIFESTO v1) — so it is never
+advertised. The advertised set is a frozen expectation a drift-guard pins.
+
 A JSON-RPC **notification** — a message with no `id`, or a `notifications/*`
 method — is fire-and-forget and is acknowledged `202 Accepted` with an EMPTY body
 BEFORE the handshake/forward routing: it is never answered with a result or a
@@ -92,7 +102,11 @@ is dropped before the forward, it too cannot ride the F5 leg.
   gateway-local 200 and the forwarder is NEVER called; removing the local routing
   reds it; `TestInitializeResultShape`, `TestToolsListReturnsToolArray` — the
   handshake responses are the shapes the SDK consumes; `TestOffSurfaceMethodStillDenied`
-  — growing the handshake did not open the allowlist to everything). The
+  — growing the handshake did not open the allowlist to everything). The advertised
+  tool-set honesty: `internal/ingress/tools_list_drift_test.go`
+  (`TestToolsListIsExpectedSetOnly` — the advertised set equals the frozen
+  expectation exactly, RED on drift; `TestSubAgentIsNeverAdvertised` — the
+  agent-loop non-goal is never advertised). The
   notification 202 rule: `internal/ingress/streamable_test.go`
   (`TestNotificationInitializedIsAccepted202` — the notification the SDK sends
   post-initialize is 202 with an empty body and never forwarded; answering it
@@ -332,8 +346,19 @@ projected `CallToolResult` (from the G2 exec hop) is validated against
 control/guest/projection bug that produced a malformed or oversized result is a
 FAIL-CLOSED refusal (a leak-free `500`), never a malformed or over-ceiling body
 handed to the caller. The valid result is then framed into the JSON-RPC envelope
-with the echoed request id; a forward with no exec projection keeps the minimal
-`{"jsonrpc":"2.0"}` body with the correlation in the header.
+with the echoed request id.
+
+Every response frame the tool-call path writes is a WELL-FORMED JSON-RPC response
+object once the request id is known: it echoes the id and carries a result XOR an
+error, never neither (JSON-RPC 2.0 §5). A forward with NO exec projection (the tool
+has no gateway argv projection) means nothing was executed, so it is answered with a
+well-formed JSON-RPC ERROR (`-32602`, echoed id) — an "unimplemented tool" — NEVER a
+bare `{"jsonrpc":"2.0"}` id-less frame and NEVER a fabricated empty-`CallToolResult`
+"success" (a false "it worked" is worse than an error). The bare id-less body a
+strict SDK cannot parse — it rejects it and HANGS waiting for a reply it can never
+correlate — is thus impossible on this path. The `id` echo is enforced structurally:
+the success-frame `rpcResultBody.id` has no `omitempty`, and the id-carrying error
+writer is used wherever the id is known.
 
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant5_LeakFreeOutbound` — a realistically-wrapped forward error is
@@ -348,7 +373,13 @@ with the echoed request id; a forward with no exec projection keeps the minimal
   The outbound result validation: `internal/ingress/exec_projection_test.go`
   (`TestMalformedExecResultFailsClosed` — a forwarded result that is not a valid
   `CallToolResult` is a fail-closed `500`, never relayed as a `200`; removing the
-  outbound `Validate` goes RED).
+  outbound `Validate` goes RED). The response well-formedness:
+  `internal/ingress/wellformed_response_test.go`
+  (`TestToolCallResponseIsWellFormedJSONRPC` — a create-only forward's body parses
+  as a JSON-RPC response object that echoes the request id and carries result XOR
+  error; reverting to the id-less `{"jsonrpc":"2.0"}` body goes RED —
+  `TestUnimplementedToolIsWellFormedError` — a tool with no projection is a
+  well-formed `-32602` error with the echoed id, never a fabricated success).
 
 ## VI. The protocol revision is pinned per connection (NFR-IC-04)
 
