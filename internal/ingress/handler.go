@@ -137,7 +137,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// rejection (a repudiation hole).
 	release, qerr := h.ceiling.Acquire(caller.KeyID)
 	if qerr != nil {
-		if !h.recordRefusal(w, r, caller.KeyID, "tools/call:(ceiling-refused)") {
+		// The ceiling runs BEFORE the body is read, so no request id is known yet; the
+		// refusal is a pre-parse transport-fault served 429 (non-2xx), legitimately
+		// id-less (the SDK catches it on the transport, never parses a body). A nil id
+		// serializes as null.
+		if !h.recordRefusal(w, r, nil, caller.KeyID, "tools/call:(ceiling-refused)") {
 			return
 		}
 		writeRPCError(w, http.StatusTooManyRequests, rpcInternalError, "connection ceiling exceeded")
@@ -155,7 +159,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.validator.ValidateSingleMessageEnvelope(raw); err != nil {
-		writeProfileDeny(w, err)
+		// The envelope check runs on the raw body; the id (if the body carried a
+		// parseable one) is echoed so a well-formed-message-but-denied request is
+		// correlatable. A body too malformed to yield an id echoes a null id.
+		writeProfileDeny(w, idFrom(raw), err)
 		return
 	}
 
@@ -207,7 +214,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (base-then-OCU-profile) BEFORE any forward. A deny here forwards nothing.
 	// Only tools/call reaches here; the allowlist refuses any other method -32601.
 	if err := h.validator.Validate(profile.KindCallToolRequest, raw); err != nil {
-		writeProfileDeny(w, err)
+		// Post-parse deny: the id is known, so the deny echoes it — an id-less deny on
+		// the 400/413 status the SDK parses would hang the client (issue #38).
+		writeProfileDeny(w, idFrom(raw), err)
 		return
 	}
 
@@ -238,7 +247,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// key).
 	srel, serr := h.serializer.Acquire(caller.Tenant, req.ToolCall.Name)
 	if serr != nil {
-		writeRPCError(w, http.StatusTooManyRequests, rpcInternalError, "session serialization queue full")
+		// Post-parse refusal: echo the id (issue #38 invariant — any error after the
+		// id is parsed is correlatable, never id-less).
+		writeRPCErrorWithID(w, idFrom(raw), http.StatusTooManyRequests, rpcInternalError, "session serialization queue full")
 		return
 	}
 	defer srel()
@@ -257,10 +268,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Fail-closed: a forward failure is a refusal, leak-free. It is a
 		// terminated request with a validated identity, so it is recorded (§XI)
 		// durable-first before the 502 — symmetric to the success emit.
-		if !h.recordRefusal(w, r, caller.KeyID, boundedResource(req.ToolCall.Name)) {
+		if !h.recordRefusal(w, r, idFrom(raw), caller.KeyID, boundedResource(req.ToolCall.Name)) {
 			return
 		}
-		writeRPCError(w, http.StatusBadGateway, rpcInternalError, "forward refused")
+		// Post-parse refusal: echo the id (issue #38). Served 502 (non-2xx), which the
+		// SDK catches on the transport, but the invariant is uniform — every post-parse
+		// error echoes the id regardless of status.
+		writeRPCErrorWithID(w, idFrom(raw), http.StatusBadGateway, rpcInternalError, "forward refused")
 		return
 	}
 
@@ -289,8 +303,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Outcome:   audit.OutcomeSuccess,
 	}
 	if err := h.emitter.Emit(r.Context(), env); err != nil {
-		// Audit write failed → the request is refused, not acked (fail-closed).
-		writeRPCError(w, http.StatusInternalServerError, rpcInternalError, "audit write failed")
+		// Audit write failed → the request is refused, not acked (fail-closed). This
+		// is post-parse, so the id is echoed (issue #38).
+		writeRPCErrorWithID(w, idFrom(raw), http.StatusInternalServerError, rpcInternalError, "audit write failed")
 		return
 	}
 
@@ -320,7 +335,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // boundary order no caller is resolved, so there is no attested actor to record.
 // That omission is deliberate (a placeholder actor would be false attribution);
 // it is documented on the audit package and pinned by TestPreAuthRefusalsDoNotEmit.
-func (h *Handler) recordRefusal(w http.ResponseWriter, r *http.Request, actorKeyID, resource string) (proceed bool) {
+//
+// id is the request id to echo on the fail-closed 500 this writes when the refusal
+// cannot be recorded. It is the parsed request id on the forward-refused path (known,
+// so the 500 is correlatable) and nil on the ceiling path (pre-body-read, no id yet —
+// a 429/500 non-2xx the SDK catches on the transport); a nil id serializes as null.
+func (h *Handler) recordRefusal(w http.ResponseWriter, r *http.Request, id jsonRPCID, actorKeyID, resource string) (proceed bool) {
 	correlation := newCorrelationID()
 	env := audit.Envelope{
 		TraceID:   correlation,
@@ -333,8 +353,9 @@ func (h *Handler) recordRefusal(w http.ResponseWriter, r *http.Request, actorKey
 	if err := h.emitter.Emit(r.Context(), env); err != nil {
 		// The refusal could not be durably recorded → fail closed with a 500,
 		// exactly as the success path does on an audit-write failure. The caller
-		// must NOT then also write the original refusal code.
-		writeRPCError(w, http.StatusInternalServerError, rpcInternalError, "audit write failed")
+		// must NOT then also write the original refusal code. The id (parsed on the
+		// forward-refused path, nil on the pre-parse ceiling path) is echoed.
+		writeRPCErrorWithID(w, id, http.StatusInternalServerError, rpcInternalError, "audit write failed")
 		return false
 	}
 	return true
