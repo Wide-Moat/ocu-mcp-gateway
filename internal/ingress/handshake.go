@@ -52,9 +52,18 @@ type serverInfo struct {
 
 // rpcResultBody is a JSON-RPC success envelope carrying an arbitrary result and
 // echoing the request id.
+//
+// ID has NO omitempty: a success frame is only ever written on a path where the id
+// is known (initialize/tools/list/a projected tools/call result), and JSON-RPC 2.0
+// §5 requires a result response to echo the id. Dropping a known id silently (the
+// omitempty foot-gun) produced an un-correlatable frame the SDK could not match,
+// which HUNG the client — so the id is always serialized on a result frame. A
+// genuinely absent id (a message that should not have reached here) serializes as
+// JSON `null`, still a valid — and visibly wrong — response, never a silently
+// id-less body.
 type rpcResultBody struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      jsonRPCID       `json:"id,omitempty"`
+	ID      jsonRPCID       `json:"id"`
 	Result  json.RawMessage `json:"result"`
 }
 

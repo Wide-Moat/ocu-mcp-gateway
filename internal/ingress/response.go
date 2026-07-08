@@ -29,8 +29,16 @@ const (
 // host/route, or stack detail (invariant #5, NFR-SEC-51). The message is a fixed
 // string chosen at the call site from a closed set, never interpolated from a
 // caller value or an internal error cause.
+//
+// ID is the echoed JSON-RPC request id and is OMITTED (omitempty) ONLY when the id
+// is not known at the error site — the pre-parse/transport errors (a bad method, an
+// unparseable body) have no id to echo, and JSON-RPC 2.0 §5 permits a null id there.
+// Once the id IS known (a parsed tools/call), the id-carrying writer below MUST be
+// used so no error frame is ever written id-less to a client that will correlate by
+// id (the hang the create-only arm caused).
 type rpcErrorBody struct {
 	JSONRPC string      `json:"jsonrpc"`
+	ID      jsonRPCID   `json:"id,omitempty"`
 	Error   rpcErrorObj `json:"error"`
 }
 
@@ -40,14 +48,32 @@ type rpcErrorObj struct {
 }
 
 // writeRPCError writes a bounded, leak-free JSON-RPC error with the given HTTP
-// status and JSON-RPC code. The message is a stable reason class supplied by the
-// call site; it MUST NOT carry caller data or an internal cause. The body is
-// small by construction (a fixed message), satisfying the size bound.
+// status and JSON-RPC code, with NO echoed id. It is for the pre-parse / transport
+// boundary where the request id is not yet known (a malformed body, a method deny
+// before the id is trusted). The message is a stable reason class supplied by the
+// call site; it MUST NOT carry caller data or an internal cause. The body is small
+// by construction (a fixed message), satisfying the size bound.
 func writeRPCError(w http.ResponseWriter, httpStatus, rpcCode int, reason string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(httpStatus)
 	_ = json.NewEncoder(w).Encode(rpcErrorBody{
 		JSONRPC: "2.0",
+		Error:   rpcErrorObj{Code: rpcCode, Message: reason},
+	})
+}
+
+// writeRPCErrorWithID writes the same bounded, leak-free JSON-RPC error but ECHOES
+// the request id. It is the id-carrying variant the serializer invariant requires:
+// once the id is known (a parsed tools/call reaching the response path), a response
+// frame — success OR error — is NEVER written without echoing it, so a client that
+// correlates responses by id can always match the reply and never hangs waiting for
+// one that never comes. The message stays a fixed reason class (invariant #5).
+func writeRPCErrorWithID(w http.ResponseWriter, id jsonRPCID, httpStatus, rpcCode int, reason string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(httpStatus)
+	_ = json.NewEncoder(w).Encode(rpcErrorBody{
+		JSONRPC: "2.0",
+		ID:      id,
 		Error:   rpcErrorObj{Code: rpcCode, Message: reason},
 	})
 }
@@ -97,34 +123,45 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 //   - Outbound validation (invariant #5, NFR-SEC-51): resp.Result is the projected
 //     MCP CallToolResult from the exec hop. Before it reaches the caller it is
 //     validated against KindCallToolResult — a control/guest/projection bug that
-//     produced a malformed or oversized result is a FAIL-CLOSED 500, never a
-//     malformed body handed to the caller. This is the outbound counterpart of the
-//     inbound profile gate; the response path was previously unvalidated.
+//     produced a malformed or oversized result is a FAIL-CLOSED 500 (id echoed),
+//     never a malformed body handed to the caller. This is the outbound counterpart
+//     of the inbound profile gate; the response path was previously unvalidated.
 //   - JSON-RPC framing: a validated result is wrapped {"jsonrpc":"2.0","id":<echoed>,
 //     "result":<CallToolResult>} so the SDK correlates the response to its request.
-//   - Create-only path: a forward with no exec projection (resp.Result empty — a
-//     non-bash tool, or a bare create) keeps the minimal {"jsonrpc":"2.0"} body with
-//     the correlation in the header (the prior stateless-create behaviour).
+//   - Create-only path (unimplemented tool): a forward with NO exec projection
+//     (resp.Result empty) means the named tool has no gateway projection, so nothing
+//     was executed. This is answered with a WELL-FORMED JSON-RPC ERROR (-32602,
+//     echoed id), NOT a bare {"jsonrpc":"2.0"} and NOT a lying empty CallToolResult
+//     "success". The old id-less body was not a valid JSON-RPC response object
+//     (JSON-RPC 2.0 §5 requires result XOR error and an echoed id), which a strict
+//     SDK rejects and then HANGS on. A false "it worked" is worse than an honest
+//     error, so an unimplemented tool is an error, never a fabricated success.
+//
+// The serializer invariant this method upholds: once the id is known (a parsed
+// tools/call always carries one — notifications never reach here), NO response frame,
+// success or error, is written without echoing it.
 //
 // The gateway has already identifier-minimized the upstream response before here;
 // the correlation id is a stable handle, NOT a session id.
 func (h *Handler) writeToolResult(w http.ResponseWriter, resp forward.SessionResponse, id json.RawMessage) {
-	// Create-only (no exec projection): preserve the minimal body + correlation
-	// header. Nothing to validate — there is no result payload.
+	// Create-only (no exec projection): the named tool is not implemented at this
+	// gateway (only tools with an argv projection execute). Answer a well-formed
+	// JSON-RPC error with the echoed id — never an id-less frame, never a fabricated
+	// success. The correlation still rides the header for operator correlation.
 	if len(resp.Result) == 0 {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if resp.Correlation != "" {
 			w.Header().Set("MCP-Correlation-Id", resp.Correlation)
 		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0"}`))
+		writeRPCErrorWithID(w, id, http.StatusOK, rpcInvalidParams, "unimplemented tool")
 		return
 	}
 
 	// Outbound validation: a result that is not a well-formed, bounded
 	// CallToolResult must never be relayed as a success (fail-closed, leak-free).
+	// The id is echoed so even the fail-closed refusal is a correlatable JSON-RPC
+	// response, not a hang.
 	if err := h.validator.Validate(profile.KindCallToolResult, resp.Result); err != nil {
-		writeRPCError(w, http.StatusInternalServerError, rpcInternalError, "invalid upstream result")
+		writeRPCErrorWithID(w, id, http.StatusInternalServerError, rpcInternalError, "invalid upstream result")
 		return
 	}
 
