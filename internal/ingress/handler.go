@@ -88,8 +88,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (1) Protocol-version pin — invariant #6. Missing or mismatched → reject.
-	if v := r.Header.Get(protocolVersionHeader); v != pinnedProtocolVersion {
+	// (1) Protocol-version pin, early header-only fast-path — invariant #6. A
+	// PRESENT-but-mismatched MCP-Protocol-Version is an actively-wrong client and
+	// is rejected here, before any body read or auth, with zero parser surface
+	// exposed. A MISSING header is NOT decided here: `initialize` is spec-exempt
+	// (the client cannot send a version it has not yet negotiated — MCP 2025-06-18
+	// streamable-HTTP), so the absent case defers to the post-parse gate below,
+	// where the method is known. This keeps the pin header-only and body-free for
+	// unauthenticated callers while still admitting a conforming SDK handshake.
+	if v := r.Header.Get(protocolVersionHeader); v != "" && v != pinnedProtocolVersion {
 		writeRPCError(w, http.StatusBadRequest, rpcInvalidParams, "unsupported or missing protocol version")
 		return
 	}
@@ -161,6 +168,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// forwarder or the validation path — it is acknowledged and dropped.
 	if isNotification(raw) {
 		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	// (3a2) Protocol-version pin, ABSENT-header arm — invariant #6. The early
+	// fast-path above already rejected a present-but-mismatched header; what
+	// remains is the ABSENT header. The MCP streamable-HTTP spec (2025-06-18,
+	// "Protocol Version Header") requires the header on every request AFTER
+	// initialization but NOT on initialize itself, because the version is not yet
+	// negotiated — the client learns it from the initialize RESULT. A conforming
+	// SDK therefore POSTs initialize with no version header; gating it would
+	// deadlock the handshake. So an absent header is accepted ONLY for initialize;
+	// every other method with no version header is rejected here (now that the
+	// method is known), never silently downgraded, and never forwarded.
+	if r.Header.Get(protocolVersionHeader) == "" && methodFrom(raw) != "initialize" {
+		writeRPCError(w, http.StatusBadRequest, rpcInvalidParams, "unsupported or missing protocol version")
 		return
 	}
 

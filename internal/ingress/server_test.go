@@ -68,8 +68,20 @@ func TestServeServesAndShutsDown(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	var resp *http.Response
 	for time.Now().Before(deadline) {
-		resp, err = http.Post("http://"+addr+"/", "application/json",
+		// An AUTHENTICATED tools/call with NO protocol-version header. Auth is the
+		// outermost boundary, so the bearer is required to reach the version pin at
+		// all (a no-bearer request 401s first). This asserts the load-bearing
+		// invariant — a forwarded method with no negotiated version is refused 400,
+		// never silently downgraded — rather than the pre-auth ordering accident the
+		// old assertion encoded (initialize is version-exempt; tools/call is not).
+		req, rerr := http.NewRequest(http.MethodPost, "http://"+addr+"/",
 			body(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{}}}`))
+		if rerr != nil {
+			t.Fatalf("build request: %v", rerr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer sk-ocu-test")
+		resp, err = http.DefaultClient.Do(req)
 		if err == nil {
 			break
 		}
@@ -78,9 +90,10 @@ func TestServeServesAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	// No protocol-version header → 400 (the version pin fires).
+	// Authenticated tools/call, no protocol-version header → 400 (the version pin
+	// fires for every forwarded method; only initialize is exempt).
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("missing version should be 400, got %d", resp.StatusCode)
+		t.Errorf("authenticated tools/call with missing version should be 400, got %d", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
 

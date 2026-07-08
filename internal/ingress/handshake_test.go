@@ -44,6 +44,32 @@ func TestHandshakeMethodsAreNotForwarded(t *testing.T) {
 	}
 }
 
+// TestInitializeIsVersionHeaderExempt is the drop-in keystone for the real SDK.
+// The MCP streamable-HTTP spec requires the MCP-Protocol-Version header on every
+// request AFTER initialization, but NOT on initialize itself — the client learns
+// the version from the initialize RESULT, so it cannot send it on the initialize
+// request. A conforming SDK (mcp-python streamablehttp_client) therefore POSTs
+// initialize with NO version header. If the version pin gated initialize, the
+// handshake would deadlock: the client can never learn the version it would need.
+// Here initialize is sent with NO version header (post version="") and MUST be
+// answered 200 gateway-local. tools/call with no version header still 400s
+// (TestInvariant6), so the pin is not weakened for the forwarded path — only the
+// spec-mandated initialize exemption is carved out.
+func TestInitializeIsVersionHeaderExempt(t *testing.T) {
+	fwd := &recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}}
+	h := acceptingHandler(t, fwd, nil)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`
+	// version="" → no MCP-Protocol-Version header, exactly what the SDK sends.
+	rec := post(h, "", "sk-ocu-good", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initialize with no version header must be answered 200 (spec exempts initialize from the version pin), got %d (body %q)", rec.Code, rec.Body.String())
+	}
+	if fwd.got != nil {
+		t.Fatalf("initialize reached the F5 forward; it must be answered gateway-local")
+	}
+}
+
 // TestInitializeResultShape asserts the initialize response is a well-formed MCP
 // InitializeResult the SDK can consume: a JSON-RPC result carrying the pinned
 // protocolVersion, a capabilities object, and a serverInfo with a name. A
