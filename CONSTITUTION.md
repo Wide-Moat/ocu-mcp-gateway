@@ -356,9 +356,21 @@ well-formed JSON-RPC ERROR (`-32602`, echoed id) — an "unimplemented tool" —
 bare `{"jsonrpc":"2.0"}` id-less frame and NEVER a fabricated empty-`CallToolResult`
 "success" (a false "it worked" is worse than an error). The bare id-less body a
 strict SDK cannot parse — it rejects it and HANGS waiting for a reply it can never
-correlate — is thus impossible on this path. The `id` echo is enforced structurally:
-the success-frame `rpcResultBody.id` has no `omitempty`, and the id-carrying error
-writer is used wherever the id is known.
+correlate — is thus impossible on this path.
+
+The id-echo is a WHOLE-HANDLER invariant, not a single-site rule: **any error the
+handler raises AFTER the request id has been parsed MUST echo that id** — the profile
+deny, the serialization-queue refusal, the forward refusal, and the audit-write
+failure all carry the id. **Pre-parse transport-faults** (a bad method, an
+unparseable/oversized body, an origin/auth/ceiling refusal before the body is read)
+are legitimately id-less, BUT are served on a NON-2XX status that a strict SDK catches
+at the transport layer (an `HTTPStatusError`) instead of parsing a body with no id. So
+an id-less body is only ever emitted where the SDK will not parse it. This is enforced
+STRUCTURALLY, so an id-less-on-a-parsed-status frame is unconstructible: the success
+frame `rpcResultBody.id` has no `omitempty`; the id-carrying error writer
+(`writeRPCErrorWithID`) is used wherever the id is known; and the id-less writer
+(`writeRPCError`, the transport-fault writer) COERCES any `2xx` it is handed to a
+`500`, so a hang-inducing id-less-on-`2xx` frame cannot be produced through it.
 
 - **Enforcement:** `internal/ingress/invariants_test.go`
   (`TestInvariant5_LeakFreeOutbound` — a realistically-wrapped forward error is
@@ -379,7 +391,14 @@ writer is used wherever the id is known.
   as a JSON-RPC response object that echoes the request id and carries result XOR
   error; reverting to the id-less `{"jsonrpc":"2.0"}` body goes RED —
   `TestUnimplementedToolIsWellFormedError` — a tool with no projection is a
-  well-formed `-32602` error with the echoed id, never a fabricated success).
+  well-formed `-32602` error with the echoed id, never a fabricated success). The
+  whole-handler id-echo class: `internal/ingress/idless_error_test.go`
+  (`TestProfileDenyEchoesRequestID` — a post-parse profile deny echoes the request
+  id, RED when the deny is id-less; `TestForwardRefusedEchoesRequestID` — a forward
+  refusal echoes the id; `TestPreParseFaultsAreNon2xx` — pre-parse faults are served
+  non-2xx so an id-less body is transport-caught; `TestTransportFaultWriterCannotEmitIdlessOn2xx`
+  — the id-less writer coerces a 2xx to non-2xx, making an id-less-on-2xx frame
+  unconstructible; removing the coercion goes RED).
 
 ## VI. The protocol revision is pinned per connection (NFR-IC-04)
 

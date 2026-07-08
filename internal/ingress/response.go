@@ -47,13 +47,26 @@ type rpcErrorObj struct {
 	Message string `json:"message"`
 }
 
-// writeRPCError writes a bounded, leak-free JSON-RPC error with the given HTTP
-// status and JSON-RPC code, with NO echoed id. It is for the pre-parse / transport
-// boundary where the request id is not yet known (a malformed body, a method deny
-// before the id is trusted). The message is a stable reason class supplied by the
-// call site; it MUST NOT carry caller data or an internal cause. The body is small
-// by construction (a fixed message), satisfying the size bound.
+// writeRPCError writes a bounded, leak-free JSON-RPC error with NO echoed id. It is
+// the TRANSPORT-FAULT writer: for the pre-parse boundary where the request id is not
+// yet known (a bad method, an unparseable/oversized body, an origin/auth/ceiling
+// refusal before the body is read). Such a fault is served on a NON-2XX status, which
+// a strict SDK catches at the transport layer (an HTTPStatusError) instead of parsing
+// the body — so an id-less body is safe here and only here.
+//
+// It STRUCTURALLY couples id-less to non-2xx: a 2xx status is a programming error
+// (an id-less body on a 2xx is the exact frame that hung the client — issue #38), so
+// it is coerced to a 500. That makes an id-less body on a 2xx UNCONSTRUCTIBLE through
+// this writer; every id-known path uses writeRPCErrorWithID instead. The message is a
+// stable reason class supplied by the call site; it MUST NOT carry caller data or an
+// internal cause (invariant #5). The body is small by construction.
 func writeRPCError(w http.ResponseWriter, httpStatus, rpcCode int, reason string) {
+	if httpStatus >= 200 && httpStatus < 300 {
+		// An id-less error on a success status is never legitimate — the SDK would
+		// parse it and hang on the missing id. Fail closed to a 500 rather than emit
+		// the hang-inducing frame.
+		httpStatus = http.StatusInternalServerError
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(httpStatus)
 	_ = json.NewEncoder(w).Encode(rpcErrorBody{
@@ -78,30 +91,38 @@ func writeRPCErrorWithID(w http.ResponseWriter, id jsonRPCID, httpStatus, rpcCod
 	})
 }
 
-// writeProfileDeny maps a profile *Deny onto a leak-free JSON-RPC error. It reads
-// ONLY the deny's stable Reason class (never any caller payload), so a validation
-// rejection cannot become an information-leak side channel (invariant #5). A
-// non-Deny error maps to a generic internal error without detail.
-func writeProfileDeny(w http.ResponseWriter, err error) {
+// writeProfileDeny maps a profile *Deny onto a leak-free JSON-RPC error, ECHOING the
+// request id. It reads ONLY the deny's stable Reason class (never any caller
+// payload), so a validation rejection cannot become an information-leak side channel
+// (invariant #5). A non-Deny error maps to a generic internal error without detail.
+//
+// The id is echoed because a profile deny of a well-formed-envelope tools/call fires
+// AFTER the request id has been parsed: an id-less deny on the 400/413 status the SDK
+// parses the body of is rejected the same way an empty body is, and the client hangs
+// (the id-less-error class, issue #38). The id-carrying writer keeps the deny
+// correlatable. The caller passes the id from the (envelope-validated) raw body; a
+// body so malformed that no id could be parsed yields a nil id, which serializes as
+// the JSON-RPC null id — still a well-formed error on its non-2xx status.
+func writeProfileDeny(w http.ResponseWriter, id jsonRPCID, err error) {
 	var d *profile.Deny
 	if !errors.As(err, &d) {
-		writeRPCError(w, http.StatusBadRequest, rpcInvalidRequest, "invalid request")
+		writeRPCErrorWithID(w, id, http.StatusBadRequest, rpcInvalidRequest, "invalid request")
 		return
 	}
 	switch d.Reason {
 	case profile.ReasonBatching:
-		writeRPCError(w, http.StatusBadRequest, rpcInvalidRequest, d.Reason.String())
+		writeRPCErrorWithID(w, id, http.StatusBadRequest, rpcInvalidRequest, d.Reason.String())
 	case profile.ReasonOverSize:
-		writeRPCError(w, http.StatusRequestEntityTooLarge, rpcInvalidParams, d.Reason.String())
+		writeRPCErrorWithID(w, id, http.StatusRequestEntityTooLarge, rpcInvalidParams, d.Reason.String())
 	case profile.ReasonMethodNotFound:
 		// An off-allowlist inbound method is "method not found" (-32601), not a
 		// malformed body: the surface is exactly tools/call, and a request naming
 		// any other method is refused here, never forwarded (method-confusion guard).
-		writeRPCError(w, http.StatusBadRequest, rpcMethodNotAllowed, d.Reason.String())
+		writeRPCErrorWithID(w, id, http.StatusBadRequest, rpcMethodNotAllowed, d.Reason.String())
 	case profile.ReasonBaseSchema, profile.ReasonProfileSchema:
-		writeRPCError(w, http.StatusBadRequest, rpcInvalidParams, d.Reason.String())
+		writeRPCErrorWithID(w, id, http.StatusBadRequest, rpcInvalidParams, d.Reason.String())
 	default:
-		writeRPCError(w, http.StatusBadRequest, rpcInvalidRequest, "invalid request")
+		writeRPCErrorWithID(w, id, http.StatusBadRequest, rpcInvalidRequest, "invalid request")
 	}
 }
 
