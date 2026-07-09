@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/projection"
 )
 
 // The file tools (create_file, view, str_replace) execute in the guest the SAME way
@@ -21,7 +22,9 @@ import (
 // command string the gateway does read to build its argv): the whole arguments object
 // is forwarded verbatim as the stdin payload.
 
-const fileInterpreter = "/usr/bin/python3"
+// fileInterpreter is the interpreter the file-tool projection targets, referenced from
+// the projection package so this assertion tracks the real value (no drift).
+const fileInterpreter = projection.InterpreterPath
 
 // projectionCase drives a tools/call for a file tool and returns what reached the
 // forwarder, so the argv shape and the opaque stdin passthrough can be asserted.

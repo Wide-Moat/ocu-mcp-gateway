@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/projection"
 )
 
 // The file-tool projections carry their behaviour in the guest SCRIPT, not the Go
@@ -53,7 +55,7 @@ func TestCreateFileScriptWritesWithParents(t *testing.T) {
 	target := filepath.Join(dir, "nested", "deep", "a.txt")
 	payload := `{"path":` + jsonStr(target) + `,"file_text":"hello\nworld"}`
 
-	out, code := runScript(t, createFileScript, payload)
+	out, code := runScript(t, projection.CreateFileScript, payload)
 	if code != 0 {
 		t.Fatalf("create_file should succeed, got exit %d, out=%q", code, out)
 	}
@@ -98,7 +100,7 @@ func TestCreateFileScriptWriteFailureErrors(t *testing.T) {
 	target := filepath.Join(roDir, "demo.py")
 	payload := `{"path":` + jsonStr(target) + `,"file_text":"x"}`
 
-	out, code := runScript(t, createFileScript, payload)
+	out, code := runScript(t, projection.CreateFileScript, payload)
 	if code == 0 {
 		t.Fatalf("a write into a read-only dir must fail non-zero, got 0 (out=%q)", out)
 	}
@@ -121,7 +123,7 @@ func TestStrReplaceScriptSingleReplace(t *testing.T) {
 	}
 	payload := `{"path":` + jsonStr(target) + `,"old_str":"BRAVO","new_str":"DELTA"}`
 
-	out, code := runScript(t, strReplaceScript, payload)
+	out, code := runScript(t, projection.StrReplaceScript, payload)
 	if code != 0 {
 		t.Fatalf("str_replace should succeed, got exit %d, out=%q", code, out)
 	}
@@ -142,7 +144,7 @@ func TestStrReplaceScriptErrorSemantics(t *testing.T) {
 		target := filepath.Join(dir, "id.txt")
 		_ = os.WriteFile(target, []byte("xx same yy"), 0o600)
 		payload := `{"path":` + jsonStr(target) + `,"old_str":"same","new_str":"same"}`
-		out, code := runScript(t, strReplaceScript, payload)
+		out, code := runScript(t, projection.StrReplaceScript, payload)
 		if code == 0 {
 			t.Fatalf("identical old/new must fail non-zero, got 0 (out=%q)", out)
 		}
@@ -155,7 +157,7 @@ func TestStrReplaceScriptErrorSemantics(t *testing.T) {
 		target := filepath.Join(dir, "nf.txt")
 		_ = os.WriteFile(target, []byte("content here"), 0o600)
 		payload := `{"path":` + jsonStr(target) + `,"old_str":"absent","new_str":"x"}`
-		out, code := runScript(t, strReplaceScript, payload)
+		out, code := runScript(t, projection.StrReplaceScript, payload)
 		if code == 0 {
 			t.Fatalf("not-found must fail non-zero, got 0 (out=%q)", out)
 		}
@@ -168,7 +170,7 @@ func TestStrReplaceScriptErrorSemantics(t *testing.T) {
 		target := filepath.Join(dir, "multi.txt")
 		_ = os.WriteFile(target, []byte("dup dup dup"), 0o600)
 		payload := `{"path":` + jsonStr(target) + `,"old_str":"dup","new_str":"x"}`
-		out, code := runScript(t, strReplaceScript, payload)
+		out, code := runScript(t, projection.StrReplaceScript, payload)
 		if code == 0 {
 			t.Fatalf("ambiguous (>1 match) must fail non-zero, got 0 (out=%q)", out)
 		}
@@ -191,7 +193,7 @@ func TestViewScriptNumbersLinesAndListsDirs(t *testing.T) {
 	t.Run("text file numbered", func(t *testing.T) {
 		target := filepath.Join(dir, "v.txt")
 		_ = os.WriteFile(target, []byte("first\nsecond\n"), 0o600)
-		out, code := runScript(t, viewScript, `{"path":`+jsonStr(target)+`}`)
+		out, code := runScript(t, projection.ViewScript, `{"path":`+jsonStr(target)+`}`)
 		if code != 0 {
 			t.Fatalf("view of a text file should succeed, got exit %d out=%q", code, out)
 		}
@@ -207,7 +209,7 @@ func TestViewScriptNumbersLinesAndListsDirs(t *testing.T) {
 		sub := filepath.Join(dir, "d")
 		_ = os.MkdirAll(sub, 0o755)
 		_ = os.WriteFile(filepath.Join(sub, "child.txt"), []byte("x"), 0o600)
-		out, code := runScript(t, viewScript, `{"path":`+jsonStr(sub)+`}`)
+		out, code := runScript(t, projection.ViewScript, `{"path":`+jsonStr(sub)+`}`)
 		if code != 0 {
 			t.Fatalf("view of a directory should succeed, got exit %d out=%q", code, out)
 		}
@@ -217,7 +219,7 @@ func TestViewScriptNumbersLinesAndListsDirs(t *testing.T) {
 	})
 
 	t.Run("missing path errors", func(t *testing.T) {
-		out, code := runScript(t, viewScript, `{"path":"/no/such/path/here"}`)
+		out, code := runScript(t, projection.ViewScript, `{"path":"/no/such/path/here"}`)
 		if code == 0 {
 			t.Fatalf("view of a missing path must fail non-zero, got 0 (out=%q)", out)
 		}
@@ -237,7 +239,7 @@ func TestFileToolScriptStdinInjectionSafe(t *testing.T) {
 	nasty := filepath.Join(dir, "a'; rm -rf $HOME; echo \"x\".txt")
 	payload := `{"path":` + jsonStr(nasty) + `,"file_text":"safe"}`
 
-	out, code := runScript(t, createFileScript, payload)
+	out, code := runScript(t, projection.CreateFileScript, payload)
 	if code != 0 {
 		t.Fatalf("create_file with a metacharacter path should still succeed as literal data, got exit %d out=%q", code, out)
 	}

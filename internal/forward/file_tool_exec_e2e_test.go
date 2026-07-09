@@ -4,11 +4,13 @@
 package forward
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/projection"
 )
 
 // A full-cycle exec e2e for the file tools: it drives the REAL forward create+exec
@@ -27,9 +30,13 @@ import (
 // payload, does the file operation end to end.
 
 // runProjectedExec decodes the exec body's argv + stdin_b64 and executes the argv on
-// the test host, feeding the decoded stdin. It returns a control execResponse with the
-// captured output — modelling exactly what a guest would do (run argv, pump stdin,
-// capture exit+stdout+stderr). python3-bearing hosts only (skipped otherwise).
+// the test host, feeding the decoded stdin. It returns a control execResponse
+// modelling exactly what a guest would do: run argv, pump stdin, capture exit AND the
+// stdout/stderr streams SEPARATELY into their own fields. The streams are captured with
+// two distinct buffers (cmd.Stdout / cmd.Stderr), NOT CombinedOutput — a mock that
+// fused the streams would make every stderr assertion vacuous, so the separation is
+// load-bearing (proven by the three-way distinguishability probe). python3-bearing
+// hosts only (the argv[0] interpreter must be on PATH; skipped otherwise).
 func runProjectedExec(t *testing.T) func(http.ResponseWriter, controlExecBody) {
 	t.Helper()
 	return func(w http.ResponseWriter, body controlExecBody) {
@@ -38,30 +45,41 @@ func runProjectedExec(t *testing.T) func(http.ResponseWriter, controlExecBody) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		// body.Argv is [interpreter, -c, script]; run it as the guest would.
-		var cmd *exec.Cmd
-		if len(body.Argv) == 3 && (body.Argv[0] == "/usr/bin/python3" || strings.HasSuffix(body.Argv[0], "python3")) {
-			py, err := exec.LookPath("python3")
+		if len(body.Argv) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		// Resolve the interpreter (argv[0]); if it is not on the host PATH, signal the
+		// test to skip via a sentinel exit rather than failing spuriously.
+		interp, err := exec.LookPath(body.Argv[0])
+		if err != nil {
+			// Fall back to a bare-name lookup (e.g. "python3" when argv[0] is an absolute
+			// guest path not present on the host).
+			base := body.Argv[0]
+			if i := strings.LastIndex(base, "/"); i >= 0 {
+				base = base[i+1:]
+			}
+			interp, err = exec.LookPath(base)
 			if err != nil {
-				// No python3 on the host — signal the test to skip via a sentinel exit.
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
 				_ = json.NewEncoder(w).Encode(controlExecResponse{
 					ExitCode:  254,
-					StderrB64: base64.StdEncoding.EncodeToString([]byte("NO_PYTHON3")),
+					StderrB64: base64.StdEncoding.EncodeToString([]byte("NO_INTERPRETER")),
 				})
 				return
 			}
-			cmd = exec.Command(py, "-c", body.Argv[2])
-		} else {
-			cmd = exec.Command(body.Argv[0], body.Argv[1:]...)
 		}
+		cmd := exec.Command(interp, body.Argv[1:]...)
 		cmd.Stdin = strings.NewReader(string(stdin))
+		// SEPARATE stdout/stderr buffers — the D2 fix. CombinedOutput would fuse them.
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 		var exitCode uint8
-		out, err := cmd.CombinedOutput()
-		if err != nil {
+		if runErr := cmd.Run(); runErr != nil {
 			var ee *exec.ExitError
-			if errors.As(err, &ee) {
+			if errors.As(runErr, &ee) {
 				exitCode = uint8(ee.ExitCode())
 			} else {
 				exitCode = 255
@@ -71,22 +89,62 @@ func runProjectedExec(t *testing.T) func(http.ResponseWriter, controlExecBody) {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(controlExecResponse{
 			ExitCode:  exitCode,
-			StdoutB64: base64.StdEncoding.EncodeToString(out),
+			StdoutB64: base64.StdEncoding.EncodeToString(stdout.Bytes()),
+			StderrB64: base64.StdEncoding.EncodeToString(stderr.Bytes()),
 		})
 	}
 }
 
-// projectFileTool mirrors the ingress projection for a file tool so the forward-level
-// e2e drives the same argv+stdin the real handler would build (create_file/view/
-// str_replace → [python3 -c script] + the arguments JSON on stdin). The scripts are
-// the ingress' committed scripts; here they are inlined minimally to keep the forward
-// test self-contained without importing the ingress package (an import cycle).
-//
-// NOTE: the SCRIPT semantics are pinned in the ingress package's script-behaviour
-// tests; this e2e proves the create+exec WIRE path carries argv+stdin and the guest
-// executes it. To keep the two in lockstep, this reads the script from an env the
-// test sets, so a script drift is caught by the ingress tests, not silently forked
-// here.
+// TestExecMockSeparatesStdoutStderrAndExit is THE anti-fake-green guard: a three-way
+// distinguishability probe on the control-mock. It runs one command that prints
+// "OUT-<marker>" to stdout, "ERR-<marker>" to stderr, and exits 7, then asserts the
+// mock captured them into DISTINCT fields: exit==7, StdoutB64 has OUT and NOT ERR,
+// StderrB64 has ERR and NOT OUT. A mock that fused the streams (CombinedOutput — the
+// D2 defect) fails this instantly: OUT and ERR would both appear in StdoutB64 and
+// StderrB64 would be empty. This red is what makes every downstream stream/exit
+// assertion in the e2e non-vacuous — without it, a stderr assertion could pass on a
+// mock that never separated the streams.
+func TestExecMockSeparatesStdoutStderrAndExit(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not on the test host")
+	}
+	const marker = "M7k9"
+	// A shell command writing distinct content to each stream and exiting 7. This is a
+	// bash_tool-shaped argv (/bin/sh -c), the same the projection builds for bash_tool.
+	argv, _ := projection.Project("bash_tool",
+		[]byte(`{"command":"printf 'OUT-`+marker+`'; printf 'ERR-`+marker+`' 1>&2; exit 7"}`))
+
+	handler := runProjectedExec(t)
+	rec := httptest.NewRecorder()
+	handler(rec, controlExecBody{Argv: argv})
+
+	var resp controlExecResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("mock response must decode as an execResponse, got %q (%v)", rec.Body.String(), err)
+	}
+	if resp.ExitCode == 254 {
+		t.Skip("interpreter not on host (sentinel exit)")
+	}
+	if resp.ExitCode != 7 {
+		t.Errorf("exit code must be 7, got %d", resp.ExitCode)
+	}
+	stdout, _ := base64.StdEncoding.DecodeString(resp.StdoutB64)
+	stderr, _ := base64.StdEncoding.DecodeString(resp.StderrB64)
+	// stdout field: OUT present, ERR absent.
+	if !strings.Contains(string(stdout), "OUT-"+marker) {
+		t.Errorf("stdout field must contain OUT-%s, got %q", marker, stdout)
+	}
+	if strings.Contains(string(stdout), "ERR-"+marker) {
+		t.Errorf("stdout field must NOT contain ERR-%s (streams fused — CombinedOutput?), got %q", marker, stdout)
+	}
+	// stderr field: ERR present, OUT absent.
+	if !strings.Contains(string(stderr), "ERR-"+marker) {
+		t.Errorf("stderr field must contain ERR-%s, got %q", marker, stderr)
+	}
+	if strings.Contains(string(stderr), "OUT-"+marker) {
+		t.Errorf("stderr field must NOT contain OUT-%s (streams fused?), got %q", marker, stderr)
+	}
+}
 
 // TestFileToolExecE2ECreatesFile is the full-cycle keystone: a create_file tool-call
 // drives create+exec; the control-mock decodes stdin_b64, runs the interpreter script
@@ -99,18 +157,11 @@ func TestFileToolExecE2ECreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "e2e", "created.txt")
 
-	// The create_file projection: python3 running the create script, arguments JSON on
-	// stdin. The script is the create-file program (parent dirs + write + success).
-	script := `
-import sys, json, os
-data = json.loads(sys.stdin.read())
-p = data['path']; ft = data['file_text']
-d = os.path.dirname(p)
-if d: os.makedirs(d, exist_ok=True)
-open(p, 'w').write(ft)
-print("Successfully created " + p)
-`
+	// Build the create_file projection from the REAL projection package — the same
+	// argv+stdin production sends. No inlined script copy: the projection and its guest
+	// scripts are the single source of truth, so this e2e proves exactly what ships.
 	argsJSON := `{"path":"` + target + `","file_text":"e2e-body"}`
+	argv, stdin := projection.Project("create_file", []byte(argsJSON))
 
 	pki := newMTLSTestPKI(t)
 	ctl := &twoHopControl{}
@@ -123,8 +174,8 @@ print("Successfully created " + p)
 		SessionHint: "chat-e2e",
 		ToolCall: ToolCall{
 			Name:  "create_file",
-			Argv:  []string{"/usr/bin/python3", "-c", script},
-			Stdin: []byte(argsJSON),
+			Argv:  argv,
+			Stdin: stdin,
 		},
 	})
 	if err != nil {
