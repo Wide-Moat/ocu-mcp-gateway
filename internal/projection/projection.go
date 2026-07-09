@@ -15,6 +15,13 @@
 // parsing or interpolating a caller string into the argv. Caller strings ride as stdin
 // DATA the fixed script parses inside the guest, so newlines/quotes/NUL cannot break
 // out of an argument (the injection-safe mechanism).
+//
+// Result-shaping boundary (a note the guest scripts here must honor): the GATEWAY is
+// the single layer that synthesizes an "[Exit code: N]" marker for a silent non-zero
+// exit (see projectCallToolResult in the forward package). The guest scripts must NOT
+// emit that marker themselves — a second synthesis would double the marker. The scripts
+// print their own diagnostics ("Error: ...") on failure and exit non-zero; the gateway
+// synthesizes the marker ONLY when a non-zero exit produced no output on either stream.
 package projection
 
 import "encoding/json"

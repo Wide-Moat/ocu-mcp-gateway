@@ -520,14 +520,32 @@ func projectCallToolResult(reply execResponseWire) ([]byte, error) {
 	}
 
 	isErr := reply.ExitCode != 0
-	// On a tool error the model must see the failure: relay stderr (falling back to
-	// stdout if the child wrote its error there). On success relay stdout.
+	// On a tool error the model must see the failure: relay stderr, falling back to
+	// stdout if the child wrote its diagnostic there. On success relay stdout.
 	text := string(stdout)
 	if isErr {
 		if len(stderr) > 0 {
 			text = string(stderr)
 		} else {
 			text = string(stdout)
+		}
+		// A non-zero exit with NO output on EITHER stream would otherwise be an EMPTY
+		// error content block — the model would see isError:true but no reason. Surface
+		// the control-reported exit code so a silent failure is still legible, matching
+		// the PoC shape "output if output else [Exit code: N]" (mcp_tools.py:456). The
+		// gap test is RAW byte length on BOTH streams (not a trimmed/whitespace test) so
+		// it mirrors the PoC's Python truthiness exactly. This is the ONLY layer that
+		// synthesizes the marker — control/guest never do (a double-marker would be a
+		// bug); the synthesis runs BEFORE boundContent so the marker is itself bounded.
+		//
+		// The gateway relays exit-code FACTS and does NOT interpret per-command exit
+		// semantics: there is deliberately no PoC-style table rewriting a tool's exit
+		// (e.g. grep-exit-1 → "No matches found"). The isError model makes that heuristic
+		// obsolete, and guessing a command from an sh -c string in the protocol path is
+		// unsound — recorded as a PoC-vs-fleet contrast, not a bug. A signal-derived exit
+		// (e.g. 137) stays "[Exit code: 137]", not a signal name.
+		if len(stdout) == 0 && len(stderr) == 0 {
+			text = fmt.Sprintf("[Exit code: %d]", reply.ExitCode)
 		}
 	}
 	text = boundContent(text)
