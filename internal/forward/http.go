@@ -307,6 +307,14 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 			Argv:        req.ToolCall.Argv,
 			TimeoutS:    clampExecTimeout(f.provisioning.ExecTimeoutSeconds),
 		}
+		// The opaque stdin payload (the file tools' arguments JSON) rides base64 into
+		// the exec body; Control decodes it into the guest child's stdin. The gateway
+		// does not read it — it is the caller's own bytes, relayed verbatim (invariant
+		// #3). Empty for a tool that carries everything in argv (e.g. bash_tool), in
+		// which case StdinB64 stays empty (omitempty) and no stdin is pumped.
+		if len(req.ToolCall.Stdin) > 0 {
+			execWire.StdinB64 = base64.StdEncoding.EncodeToString(req.ToolCall.Stdin)
+		}
 		execBody, err := f.postJSON(ctx, token, execPath, execWire)
 		if err != nil {
 			// A transport-level exec failure (route down, non-2xx) fails the whole
