@@ -502,9 +502,12 @@ type contentBlock struct {
 // reconciled with control's exec-reply ceiling, or a LEGAL reply is silently lost:
 //
 //   - controlReplyStreamCeiling is control's per-stream capture ceiling
-//     (ocu-control guestexec/driver.go defaultStdioCap = 8 MiB). It is mirrored here
-//     as the number the gateway sizes against; the two MUST be cross-checked when
-//     either moves (they diverged 340× — 64 KiB vs 8 MiB — which is task #127).
+//     (ocu-control guestexec/driver.go defaultStdioCap). It is mirrored here as the
+//     number the gateway sizes against; the two MUST be cross-checked when either moves.
+//     They once diverged 340× (64 KiB gateway read vs 8 MiB control capture), which
+//     dropped a large output as a 502 (task #127); control now bounds each stream at
+//     64 KiB AT THE SOURCE (#128), so a legal reply is small and the gateway read cap
+//     is tightened back to a snug anti-hostile bound (#131).
 //   - maxReplyBytes (the F5 reply read cap) MUST be >= 2×ceil(ceiling×4/3)+envelope:
 //     a reply carries base64(stdout)+base64(stderr) (each grows ×4/3) in a JSON
 //     envelope. Below that, io.LimitReader truncates the JSON mid-string, the reply
@@ -514,12 +517,15 @@ type contentBlock struct {
 //     whole). It only truncates a stream that already exceeded control's ceiling, and
 //     when it does the truncation is SURFACED to the caller (not silent).
 const (
-	// controlReplyStreamCeiling mirrors ocu-control defaultStdioCap (8 MiB per stream).
-	controlReplyStreamCeiling = 8 << 20
-	// maxReplyBytes bounds the F5 reply read. 24 MiB covers two 8 MiB streams base64'd
-	// (≈10.7 MiB each) plus the JSON envelope, with headroom — so a legal control reply
-	// always parses (2×ceil(8MiB×4/3) ≈ 21.4 MiB < 24 MiB).
-	maxReplyBytes = 24 << 20
+	// controlReplyStreamCeiling mirrors ocu-control defaultStdioCap (64 KiB per stream,
+	// #128) — the source-side bound on each captured exec-reply stream.
+	controlReplyStreamCeiling = 64 << 10
+	// maxReplyBytes bounds the F5 reply read. Control's legal max reply is two 64 KiB
+	// streams base64'd (≈87 KiB each) plus the JSON envelope ≈ 176 KiB; 256 KiB covers
+	// that with headroom (2×ceil(64KiB×4/3) ≈ 176 KiB < 256 KiB) and restores a snug
+	// anti-hostile read bound now that control guarantees small replies (#131). The
+	// transitional 24 MiB bound was only needed while control still captured 8 MiB.
+	maxReplyBytes = 256 << 10
 	// maxExecContentBytes bounds the per-stream captured output the gateway relays in a
 	// CallToolResult content block. It is >= controlReplyStreamCeiling so boundContent
 	// never fires on a legal reply; it is a rune-safe truncation (never splits a
