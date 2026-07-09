@@ -4,6 +4,7 @@
 package ingress
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,7 +36,8 @@ func runScript(t *testing.T, script, stdin string) (string, int) {
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			code = ee.ExitCode()
 		} else {
 			t.Fatalf("running script: %v", err)

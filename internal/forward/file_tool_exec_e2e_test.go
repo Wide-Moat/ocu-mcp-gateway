@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -59,7 +60,8 @@ func runProjectedExec(t *testing.T) func(http.ResponseWriter, controlExecBody) {
 		var exitCode uint8
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
 				exitCode = uint8(ee.ExitCode())
 			} else {
 				exitCode = 255
