@@ -308,3 +308,71 @@ func TestL4CreateFileReadOnlyDirErrors(t *testing.T) {
 		t.Errorf("a failed create_file must write NOTHING; os.Stat(%q) err = %v, want IsNotExist", target, err)
 	}
 }
+
+// @L4 @view @happy — view shows a text file with right-justified line numbers, through
+// the forward: not an error, and each line prefixed with its number.
+func TestL4ViewNumbersTextLines(t *testing.T) {
+	path := writeHostFile(t, "v.txt", "first\nsecond\n")
+	shape, _ := forwardToolL4(t, "view", `{"path":`+jsonField(path)+`}`)
+
+	if shape.IsError {
+		t.Errorf("view of a text file must not be an error, got %+v", shape.Content)
+	}
+	text := resultText(t, shape)
+	// The script numbers with a right-justified 6-wide number + a tab (str(i).rjust(6)
+	// + "\t"); assert both lines appear numbered.
+	if !strings.Contains(text, "1\tfirst") || !strings.Contains(text, "2\tsecond") {
+		t.Errorf("view must number each line (\"     1\\tfirst\" ...), got %q", text)
+	}
+}
+
+// @L4 @view @dir — view lists a directory's entries through the forward.
+func TestL4ViewListsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "child.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shape, _ := forwardToolL4(t, "view", `{"path":`+jsonField(dir)+`}`)
+
+	if shape.IsError {
+		t.Errorf("view of a directory must not be an error, got %+v", shape.Content)
+	}
+	if got := resultText(t, shape); !strings.Contains(got, "child.txt") {
+		t.Errorf("view of a directory must list its entries, got %q", got)
+	}
+}
+
+// @L4 @view @error — view of a missing path is a tool error whose content says
+// "not found".
+func TestL4ViewMissingPathErrors(t *testing.T) {
+	shape, _ := forwardToolL4(t, "view", `{"path":"/no/such/path/l4-here"}`)
+
+	if !shape.IsError {
+		t.Errorf("view of a missing path must project isError:true, got %+v", shape)
+	}
+	if got := resultText(t, shape); !strings.Contains(got, "not found") {
+		t.Errorf("view of a missing path must say \"not found\", got %q", got)
+	}
+}
+
+// @L4 @view @binary — view of a non-UTF8 (binary) file does NOT crash. TOTAL GAP
+// before: the script reads with errors='replace', so a binary body is shown with
+// replacement characters rather than raising. This pins that a binary body is handled
+// (not a Tier-2 crash), through the forward.
+func TestL4ViewBinaryFileDoesNotCrash(t *testing.T) {
+	// Bytes that are not valid UTF-8 (a lone 0xFF, an incomplete multibyte lead).
+	path := filepath.Join(t.TempDir(), "b.bin")
+	if err := os.WriteFile(path, []byte{0xFF, 0xFE, 0x00, 0x80, 'a', 'b'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shape, _ := forwardToolL4(t, "view", `{"path":`+jsonField(path)+`}`)
+
+	if shape.IsError {
+		t.Errorf("view of a binary file must NOT crash into a tool error (errors='replace'), got %+v", shape.Content)
+	}
+	// It returns some content without raising — the exact replacement rendering is not
+	// pinned (that is interpreter-dependent), only that it did not error.
+	if len(shape.Content) != 1 {
+		t.Errorf("view of a binary file must still return a single content block, got %+v", shape.Content)
+	}
+}
