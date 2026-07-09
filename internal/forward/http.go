@@ -387,8 +387,13 @@ func (f *ControlForwarder) postJSON(ctx context.Context, token, path string, bod
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Bound the reply read so an oversized/hostile response cannot exhaust memory.
-	const maxReplyBytes = 64 << 10
+	// Bound the reply read so an oversized/hostile response cannot exhaust memory, but
+	// the bound MUST cover a LEGAL control reply or io.LimitReader truncates the JSON
+	// mid-string and the reply is lost as a 502 (task #127). The reply is a JSON
+	// envelope carrying base64(stdout)+base64(stderr); control bounds each stream at
+	// controlReplyStreamCeiling, so a legal reply is at most
+	// 2×ceil(ceiling×4/3)+envelope. maxReplyBytes is that bound with headroom — see the
+	// cross-component sizing invariant on the constant.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxReplyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("%w: read F5 %s reply: %w", ErrForwardFailed, path, err)
@@ -493,13 +498,35 @@ type contentBlock struct {
 	Text string `json:"text"`
 }
 
-// maxExecContentBytes bounds the per-stream captured output the gateway relays in
-// a CallToolResult content block. Control already bounds the exec streams host-side
-// (per-stream stdio ceiling) and sets the truncation flags; this is the gateway's
-// own defence-in-depth pre-buffer cap so an unexpectedly large stream cannot push
-// the CallToolResult over its schema/byte ceiling (NFR-SEC-46). It is a rune-safe
-// truncation (never splits a multi-byte rune).
-const maxExecContentBytes = 64 << 10
+// CROSS-COMPONENT SIZING INVARIANT (task #127). The gateway's byte bounds MUST be
+// reconciled with control's exec-reply ceiling, or a LEGAL reply is silently lost:
+//
+//   - controlReplyStreamCeiling is control's per-stream capture ceiling
+//     (ocu-control guestexec/driver.go defaultStdioCap = 8 MiB). It is mirrored here
+//     as the number the gateway sizes against; the two MUST be cross-checked when
+//     either moves (they diverged 340× — 64 KiB vs 8 MiB — which is task #127).
+//   - maxReplyBytes (the F5 reply read cap) MUST be >= 2×ceil(ceiling×4/3)+envelope:
+//     a reply carries base64(stdout)+base64(stderr) (each grows ×4/3) in a JSON
+//     envelope. Below that, io.LimitReader truncates the JSON mid-string, the reply
+//     fails to parse, and the whole result is dropped as a 502.
+//   - maxExecContentBytes (the per-stream content bound) MUST be >= the ceiling, so
+//     boundContent NEVER fires on a legal reply (a legal stream reaches the caller
+//     whole). It only truncates a stream that already exceeded control's ceiling, and
+//     when it does the truncation is SURFACED to the caller (not silent).
+const (
+	// controlReplyStreamCeiling mirrors ocu-control defaultStdioCap (8 MiB per stream).
+	controlReplyStreamCeiling = 8 << 20
+	// maxReplyBytes bounds the F5 reply read. 24 MiB covers two 8 MiB streams base64'd
+	// (≈10.7 MiB each) plus the JSON envelope, with headroom — so a legal control reply
+	// always parses (2×ceil(8MiB×4/3) ≈ 21.4 MiB < 24 MiB).
+	maxReplyBytes = 24 << 20
+	// maxExecContentBytes bounds the per-stream captured output the gateway relays in a
+	// CallToolResult content block. It is >= controlReplyStreamCeiling so boundContent
+	// never fires on a legal reply; it is a rune-safe truncation (never splits a
+	// multi-byte rune) that only trims a stream already past control's ceiling, and the
+	// caller is told when it fires.
+	maxExecContentBytes = controlReplyStreamCeiling
+)
 
 // projectCallToolResult maps Control's execResponse into the MCP CallToolResult the
 // caller receives. The TWO-TIER error model (x-ocu-error-model): a NON-ZERO guest
@@ -548,7 +575,27 @@ func projectCallToolResult(reply execResponseWire) ([]byte, error) {
 			text = fmt.Sprintf("[Exit code: %d]", reply.ExitCode)
 		}
 	}
-	text = boundContent(text)
+
+	// Determine whether the RELAYED stream was truncated — either control already
+	// truncated it at its ceiling (the wire flag), or the gateway's boundContent is
+	// about to trim it. text carries stderr when a tool error wrote to stderr, else
+	// stdout, so the matching control flag is chosen the same way.
+	controlTruncated := reply.StdoutTruncated
+	if isErr && len(stderr) > 0 {
+		controlTruncated = reply.StderrTruncated
+	}
+	bounded := boundContent(text)
+	gatewayTruncated := len(bounded) < len(text)
+	text = bounded
+
+	// Surface truncation to the caller so a clipped body is never presented as
+	// complete. This is the SAME single-synthesis layer as the [Exit code: N] marker —
+	// control/guest never annotate; the gateway is the one place a truncation note is
+	// added. A truncated SUCCESS is still a success (isError unchanged): the note is
+	// informational, not an error. N is the byte length actually relayed.
+	if controlTruncated || gatewayTruncated {
+		text += fmt.Sprintf("\n[output truncated at %d bytes]", len(text))
+	}
 
 	result := callToolResult{
 		Content: []contentBlock{{Type: "text", Text: text}},

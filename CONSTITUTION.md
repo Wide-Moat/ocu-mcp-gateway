@@ -393,6 +393,22 @@ FAIL-CLOSED refusal (a leak-free `500`), never a malformed or over-ceiling body
 handed to the caller. The valid result is then framed into the JSON-RPC envelope
 with the echoed request id.
 
+CROSS-COMPONENT SIZING INVARIANT (task #127). The gateway's F5 reply-read cap and its
+per-stream content bound MUST be reconciled with control's exec-reply ceiling, or a
+LEGAL large reply is silently lost. The exec reply carries `base64(stdout)+base64(stderr)`
+in a JSON envelope; control bounds each stream at its own ceiling
+(`controlReplyStreamCeiling`, mirroring ocu-control `defaultStdioCap`). The read cap
+`maxReplyBytes` MUST be `>= 2×ceil(ceiling×4/3) + envelope` — below it, `io.LimitReader`
+truncates the reply JSON mid-string, the parse fails, and the WHOLE result is dropped as
+a `502` (a large `bash_tool` output, or a killed command's partial output, vanishing was
+the live defect). The content bound `maxExecContentBytes` MUST be `>= ceiling` so
+`boundContent` never fires on a legal reply. When a stream IS truncated — either control
+set its wire flag (`stdout_truncated`/`stderr_truncated`) or the gateway's `boundContent`
+trimmed an over-ceiling stream — the caller is TOLD (`"[output truncated at N bytes]"`),
+never handed a clipped body that looks complete; a truncated success stays `isError:false`.
+The truncation note is synthesized in the SAME single place as the `[Exit code: N]` marker
+(`projectCallToolResult`) — control/guest never annotate, so the note cannot be doubled.
+
 Every response frame the tool-call path writes is a WELL-FORMED JSON-RPC response
 object once the request id is known: it echoes the id and carries a result XOR an
 error, never neither (JSON-RPC 2.0 §5). A forward with NO exec projection (the tool
@@ -443,7 +459,13 @@ frame `rpcResultBody.id` has no `omitempty`; the id-carrying error writer
   refusal echoes the id; `TestPreParseFaultsAreNon2xx` — pre-parse faults are served
   non-2xx so an id-less body is transport-caught; `TestTransportFaultWriterCannotEmitIdlessOn2xx`
   — the id-less writer coerces a 2xx to non-2xx, making an id-less-on-2xx frame
-  unconstructible; removing the coercion goes RED).
+  unconstructible; removing the coercion goes RED). The cross-component sizing
+  invariant: `internal/forward/large_reply_test.go` (`TestLargeReplyParsesNotDropped` —
+  a reply far past the old 64 KiB cap parses and relays a bounded result, not a 502;
+  shrinking `maxReplyBytes` back to 64 KiB goes RED with "unexpected end of JSON input";
+  `TestControlTruncationFlagIsSurfaced` — control's `stdout_truncated` flag reaches the
+  caller as a note; `TestGatewayBoundContentTruncationIsSurfaced` — a gateway-side
+  `boundContent` trim is surfaced too; suppressing the note goes RED).
 
 ## VI. The protocol revision is pinned per connection (NFR-IC-04)
 
