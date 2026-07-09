@@ -311,11 +311,20 @@ requirement for `bash_tool`. `sub_agent` stays delisted (the agent-loop non-goal
   interpreter with a stdin payload: `TestStrReplaceScriptErrorSemantics` pins the
   three canonical errors — identical, not-found, ambiguous-refused; disabling the
   ambiguous guard reds it; `TestFileToolScriptStdinInjectionSafe` — a metacharacter
-  path is handled as literal data). The full-cycle exec e2e:
+  path is handled as literal data). The tool→exec projection is a SINGLE SOURCE OF
+  TRUTH in a leaf package `internal/projection` (`Project`, the scripts, and the
+  interpreter path), imported by BOTH the ingress boundary and the forward-level e2e,
+  so the argv and guest scripts cannot drift between what production sends and what a
+  test proves — `internal/projection/projection_test.go` pins the argv shapes, the
+  opaque-and-copied stdin, and the no-projection cases. The full-cycle exec e2e:
   `internal/forward/file_tool_exec_e2e_test.go`
-  (`TestFileToolExecE2ECreatesFile` — a `create_file` call drives create+exec, the
-  stdin_b64 carries the arguments verbatim over the wire, and the guest actually
-  writes the file; removing the forward's stdin threading reds it).
+  (`TestFileToolExecE2ECreatesFile` — a `create_file` call drives create+exec built
+  from the real `projection.Project`, the stdin_b64 carries the arguments verbatim
+  over the wire, and the guest actually writes the file; removing the forward's stdin
+  threading reds it; `TestExecMockSeparatesStdoutStderrAndExit` — the anti-fake-green
+  three-way probe: one command writing to stdout+stderr and exiting non-zero must land
+  in DISTINCT fields, which reds against a stream-fusing `CombinedOutput` mock, so
+  every downstream stream/exit assertion is non-vacuous).
   The SHIPPED wiring (a self-audit found the composition root calling a legacy
   endpoint-only constructor AROUND these guards — the guarded path existed,
   production did not walk it): the legacy `NewControlForwarder` was REMOVED, so

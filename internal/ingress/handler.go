@@ -16,6 +16,7 @@ import (
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/projection"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/quota"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/serialize"
 )
@@ -462,64 +463,15 @@ func toolCallFrom(raw []byte) forward.ToolCall {
 		} `json:"params"`
 	}
 	_ = json.Unmarshal(raw, &msg) // raw is already validated; a decode miss yields a zero ToolCall
-	argv, stdin := projectExec(msg.Params.Name, msg.Params.Arguments)
+	// The tool→exec projection (argv + opaque stdin) comes from the leaf projection
+	// package, the SINGLE source of truth shared with the forward-level e2e so the argv
+	// and guest scripts cannot drift between production and test (invariant #3: the
+	// arguments ride as opaque stdin, never parsed or interpolated into the argv).
+	argv, stdin := projection.Project(msg.Params.Name, msg.Params.Arguments)
 	return forward.ToolCall{
 		Name:      msg.Params.Name,
 		Arguments: msg.Params.Arguments,
 		Argv:      argv,
 		Stdin:     stdin,
 	}
-}
-
-// projectExec derives the guest exec projection (the command argv and any stdin
-// payload) the exec hop runs from a validated tool-call's name and arguments. The
-// translation lives HERE (not in the forward package) so the forward keeps the
-// arguments opaque (invariant #3): the gateway maps the OCU tool surface onto an
-// exec exactly once, at the ingress boundary. It returns (nil, nil) for a tool with
-// no projection, which the forward reads as "no exec hop" (the create-only path, a
-// well-formed -32602 to the caller). It injects no credential.
-//
-// bash_tool {"command":"..."} runs the command through the POSIX shell
-// (["/bin/sh","-c",command]), the command in the argv, no stdin. The interpreter is
-// deliberate: /bin/sh not bash (a POSIX /bin/sh is the guest-image contract; a `bash`
-// binary is promised by no guest, so naming it risks ENOENT); an ABSOLUTE path (no
-// PATH dependence); -c not -lc (`-l`/login is undefined for a busybox `sh` and
-// unwanted for a stateless tool-call).
-//
-// The file tools (create_file, view, str_replace) project to the guest interpreter
-// running a FIXED script (["/usr/bin/python3","-c",<script>]) with the WHOLE
-// tool-arguments JSON carried VERBATIM on stdin. Caller strings (a path, a file body)
-// ride as stdin DATA the script parses inside the guest — they are never interpolated
-// into the argv or a shell string, so newlines/quotes/NUL cannot break out of an
-// argument (the injection-safe mechanism). The gateway does not parse the arguments
-// (invariant #3, stricter here than for bash whose command it reads to build argv):
-// it forwards the arguments bytes UNCHANGED as the stdin payload.
-//
-// Guest-image note: the file-tool projection requires /usr/bin/python3 in the guest.
-// The PoC-parity guest that supports these tools ships it; a minimal guest without
-// python3 would fail the exec (a Tier-2 tool error the caller sees), so a deployment
-// advertising the file tools MUST run a python3-bearing guest — a guest-image
-// contract like the /bin/sh requirement for bash_tool.
-func projectExec(name string, arguments json.RawMessage) (argv []string, stdin []byte) {
-	if name == "bash_tool" {
-		var args struct {
-			Command string `json:"command"`
-		}
-		if err := json.Unmarshal(arguments, &args); err != nil || args.Command == "" {
-			return nil, nil
-		}
-		return []string{"/bin/sh", "-c", args.Command}, nil
-	}
-	if script, ok := fileToolScripts[name]; ok {
-		// The arguments object is forwarded VERBATIM as the stdin payload — opaque,
-		// never re-parsed or re-serialized (invariant #3). A tool-call with no
-		// arguments object has nothing to act on, so it has no projection.
-		if len(arguments) == 0 {
-			return nil, nil
-		}
-		return []string{fileInterpreterPath, "-c", script}, []byte(arguments)
-	}
-	// Any other tool name has no gateway exec projection (sub_agent is delisted; an
-	// off-surface name a caller sends directly falls here) — the create-only path.
-	return nil, nil
 }
