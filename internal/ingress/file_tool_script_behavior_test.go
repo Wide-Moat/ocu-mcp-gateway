@@ -69,6 +69,48 @@ func TestCreateFileScriptWritesWithParents(t *testing.T) {
 	}
 }
 
+// TestCreateFileScriptWriteFailureErrors pins create_file's FAILURE contract: a write
+// the guest cannot perform (here, a target inside a read-only directory) is a Tier-2
+// tool error — the script prints "Error: <cause>" and exits non-zero, and CRUCIALLY
+// writes NOTHING (no partial/empty file left behind). This mirrors a real live case
+// (create_file into a non-writable path returned "[Errno 13] Permission denied" and
+// created no file). It is a coverage pin on behaviour that already exists; the value
+// is the pinned regression and the no-partial-write assertion.
+func TestCreateFileScriptWriteFailureErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		// Root bypasses a 0555 directory's write bit, so the failure would not trigger
+		// and the test would be vacuous. The guest exec child is unprivileged, which is
+		// where this path is real; CI runners are non-root, so this only skips a
+		// root-local run.
+		t.Skip("root bypasses 0555 dir perms; the guest write-failure path is exercised where the exec child is unprivileged")
+	}
+	dir := t.TempDir()
+	roDir := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(roDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	// Restore write so t.TempDir's cleanup can remove the tree.
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o755) })
+
+	target := filepath.Join(roDir, "demo.py")
+	payload := `{"path":` + jsonStr(target) + `,"file_text":"x"}`
+
+	out, code := runScript(t, createFileScript, payload)
+	if code == 0 {
+		t.Fatalf("a write into a read-only dir must fail non-zero, got 0 (out=%q)", out)
+	}
+	if !strings.Contains(out, "Error") {
+		t.Errorf("a write failure must surface an \"Error: <cause>\" the caller sees, got %q", out)
+	}
+	// The load-bearing assertion: NOTHING is written on failure (no partial/empty file).
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("a failed create_file must write NOTHING; os.Stat(%q) err = %v, want IsNotExist", target, err)
+	}
+}
+
 // TestStrReplaceScriptSingleReplace pins the happy path: a single unambiguous
 // occurrence is replaced and the file is rewritten.
 func TestStrReplaceScriptSingleReplace(t *testing.T) {
