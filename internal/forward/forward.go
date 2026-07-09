@@ -89,6 +89,18 @@ type ToolCall struct {
 	// session the create hop already provisioned. An empty Argv means the tool has
 	// no exec projection (the create-only path); the exec hop is skipped.
 	Argv []string
+
+	// Stdin is the OPAQUE payload the exec hop pumps to the guest child's stdin (the
+	// forward base64-encodes it into execBodyWire.StdinB64; Control decodes it into
+	// the child's stdin, EOF-terminated). It is how the file tools (create_file,
+	// view, str_replace) pass their arguments to the fixed interpreter script the
+	// ingress projects: the WHOLE tool-arguments JSON rides here verbatim, so caller
+	// bytes (a path, a file body — newlines, quotes, NUL) never touch the argv and
+	// cannot break out of an argument. The gateway does NOT parse it (invariant #3 —
+	// stricter here than for bash, whose command string the ingress reads). Empty for
+	// a tool whose projection needs no stdin (e.g. bash_tool, which carries its
+	// command in the argv). It carries NO credential.
+	Stdin []byte
 }
 
 // SessionResponse is what the Control/operator API returns on F5, relayed back

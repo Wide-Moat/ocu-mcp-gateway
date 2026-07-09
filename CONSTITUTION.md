@@ -64,14 +64,14 @@ inbound method is a one-line add plus its own local-answer-or-forward decision a
 test, never a rewrite.
 
 `tools/list` advertises ONLY the tools the gateway can actually serve end-to-end.
-Advertising a tool the gateway cannot serve (one with no gateway argv projection, so
+Advertising a tool the gateway cannot serve (one with no gateway exec projection, so
 its `tools/call` reaches the create-only path and executes nothing) is worse than
-omitting it: the client will call it and the response has no result to relay. Today
-the only end-to-end tool is `bash_tool`, so it is the only advertised tool; the file
-operations (`create_file`, `view`, `str_replace`) are re-advertised in the SAME
-change that gives each a working projection, never before. `sub_agent` is a PERMANENT
-non-goal — the OCU fleet does not run the agent loop (MANIFESTO v1) — so it is never
-advertised. The advertised set is a frozen expectation a drift-guard pins.
+omitting it: the client will call it and the response has no result to relay. The
+served tools are `bash_tool` and the file tools (`create_file`, `view`,
+`str_replace`), each of which projects to a guest exec (§III); a tool is advertised in
+the SAME change that gives it a working projection, never before. `sub_agent` is a
+PERMANENT non-goal — the OCU fleet does not run the agent loop (MANIFESTO v1) — so it
+is never advertised. The advertised set is a frozen expectation a drift-guard pins.
 
 A JSON-RPC **notification** — a message with no `id`, or a `notifications/*`
 method — is fire-and-forget and is acknowledged `202 Accepted` with an EMPTY body
@@ -223,14 +223,34 @@ guest child's captured streams (base64 on the wire) are projected into an MCP
 `CallToolResult` under the TWO-TIER error model: a NON-ZERO guest exit is a Tier-2
 TOOL error (`isError:true` with the sanitized stderr as content, a legitimate outcome
 the model sees), NOT a transport `ErrForwardFailed` — the forward itself succeeded.
-The command-to-argv translation lives in the ingress (`bash_tool {"command":"..."}` →
-`["/bin/sh","-c",command]`), so the forward package holds the arguments opaque
-(invariant #3). The interpreter is the POSIX `/bin/sh` (an absolute path, `-c` not
-`-lc`): an image that supports `bash_tool` guarantees a POSIX `/bin/sh` (the
-guest-image contract), so the gateway does not name a `bash` binary no guest
-contract promises, nor depend on PATH resolution in a near-empty guest; `-l` (login)
-is a non-POSIX extension undefined for a busybox `sh` and unwanted for a stateless
-tool-call.
+The tool-to-exec translation lives in the ingress, so the forward package holds the
+arguments opaque (invariant #3). `bash_tool {"command":"..."}` →
+`["/bin/sh","-c",command]`, the command in the argv, no stdin: the interpreter is the
+POSIX `/bin/sh` (an absolute path, `-c` not `-lc`) — an image that supports `bash_tool`
+guarantees a POSIX `/bin/sh` (the guest-image contract), so the gateway does not name
+a `bash` binary no guest contract promises, nor depend on PATH resolution; `-l`
+(login) is a non-POSIX extension undefined for a busybox `sh` and unwanted for a
+stateless tool-call.
+
+The FILE tools (`create_file`, `view`, `str_replace`) are exec projections too — they
+run in the guest exactly like `bash_tool`, not as a guest RPC. Each projects to the
+guest interpreter running a FIXED script (`["/usr/bin/python3","-c",<script>]`) with
+the WHOLE tool-arguments JSON carried VERBATIM on the exec `stdin_b64` (the ingress
+sets `ToolCall.Stdin`; the forward base64-encodes it; Control pumps it to the guest
+child's stdin). The caller's strings — a path, a file body — ride as stdin DATA the
+script parses INSIDE the guest; they are NEVER interpolated into the argv or a shell
+string, so newlines, quotes, and NUL cannot break out of an argument (the
+injection-safe mechanism, and why the arguments ride stdin rather than argv). The
+gateway does not parse the arguments (invariant #3 holds even more strictly than for
+`bash_tool`, whose command string the ingress does read to build the argv). The
+scripts implement the canonical file-edit semantics: `create_file` makes parent dirs
+then writes; `str_replace` does a SINGLE unambiguous replacement, refusing an
+identical old/new, a not-found `old_str`, or MORE THAN ONE occurrence (an ambiguous
+edit is never applied); `view` numbers a text file's lines, lists a directory, and
+errors on a missing path (the image-resize path is out of scope). The interpreter is
+`/usr/bin/python3` (an absolute path); a deployment advertising the file tools MUST
+run a guest that ships `/usr/bin/python3` — a guest-image contract like the `/bin/sh`
+requirement for `bash_tool`. `sub_agent` stays delisted (the agent-loop non-goal).
 
 - **Enforcement:** `internal/forward/no_credential_test.go`
   (`TestForwardShapesCarryNoCredential` — a reflect pass over every forward shape
@@ -279,7 +299,23 @@ tool-call.
   `internal/ingress/exec_projection_test.go`
   (`TestBashToolArgvIsDerivedFromCommand` — `bash_tool {"command":...}` forwards
   `["/bin/sh","-c",command]` (POSIX shell, not `bash`); `TestExecResultIsFramedWithEchoedID` — the result is
-  framed with the echoed JSON-RPC id).
+  framed with the echoed JSON-RPC id). The file-tool exec projections:
+  `internal/ingress/file_tool_projection_test.go`
+  (`TestCreateFileProjectsToInterpreterWithStdin` / `TestStrReplaceProjectsToInterpreterWithStdin`
+  / `TestViewProjectsToInterpreterWithStdin` — each projects to
+  `["/usr/bin/python3","-c",<script>]` with the arguments JSON verbatim on stdin;
+  `TestFileToolStdinIsOpaqueNotReparsed` — the stdin is the caller's exact bytes,
+  never re-parsed (invariant #3); `TestFileToolsAreAdvertised` — the served set is
+  advertised; reverting a projection to nil reds these) and the SCRIPT behaviour
+  `internal/ingress/file_tool_script_behavior_test.go` (runs each script through the
+  interpreter with a stdin payload: `TestStrReplaceScriptErrorSemantics` pins the
+  three canonical errors — identical, not-found, ambiguous-refused; disabling the
+  ambiguous guard reds it; `TestFileToolScriptStdinInjectionSafe` — a metacharacter
+  path is handled as literal data). The full-cycle exec e2e:
+  `internal/forward/file_tool_exec_e2e_test.go`
+  (`TestFileToolExecE2ECreatesFile` — a `create_file` call drives create+exec, the
+  stdin_b64 carries the arguments verbatim over the wire, and the guest actually
+  writes the file; removing the forward's stdin threading reds it).
   The SHIPPED wiring (a self-audit found the composition root calling a legacy
   endpoint-only constructor AROUND these guards — the guarded path existed,
   production did not walk it): the legacy `NewControlForwarder` was REMOVED, so

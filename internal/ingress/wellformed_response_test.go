@@ -34,22 +34,26 @@ type jsonRPCResponse struct {
 }
 
 // TestToolCallResponseIsWellFormedJSONRPC is the well-formedness keystone: a
-// create-only forward (empty Result — a tool with no exec projection, e.g.
-// create_file) must NOT produce an id-less, result-less body. The response must
-// parse as a JSON-RPC response object that echoes the request id and carries a
-// result XOR an error.
+// create-only forward (empty Result — a tool with no exec projection) must NOT
+// produce an id-less, result-less body. The response must parse as a JSON-RPC
+// response object that echoes the request id and carries a result XOR an error.
+//
+// The tool name is one with NO projection (the served tools — bash_tool and the file
+// tools — all project to an exec now, so an unprojected name is what reaches the
+// create-only arm: an off-surface tool a caller sends directly, or a future tool
+// not yet wired). That keeps this test pinning the create-only arm's shape.
 //
 // Red-probe: the prior create-only arm wrote {"jsonrpc":"2.0"} (no id, no
 // result/error), so the id-echo assertion and the result-XOR-error assertion both
 // red. Restoring the id-carrying error frame greens them.
 func TestToolCallResponseIsWellFormedJSONRPC(t *testing.T) {
 	// A forward that returns an empty Result (the create-only path a tool with no
-	// exec projection takes). create_file is such a tool today.
+	// exec projection takes). "not_a_real_tool" has no projection.
 	fwd := &recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}}
 	h := acceptingHandler(t, fwd, nil)
 
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-good",
-		`{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"create_file","arguments":{"description":"d","file_text":"x","path":"/tmp/a"}}}`)
+		`{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"not_a_real_tool","arguments":{"x":"y"}}}`)
 
 	var resp jsonRPCResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -75,9 +79,10 @@ func TestToolCallResponseIsWellFormedJSONRPC(t *testing.T) {
 
 // TestUnimplementedToolIsWellFormedError pins the RULED shape of the create-only
 // arm: an unimplemented tool (no exec projection) is answered with a well-formed
-// JSON-RPC ERROR, code -32602, with the echoed id — NOT a lying empty
-// CallToolResult "success" (a false "file created" is worse than the hang). The
-// gateway must never claim a file op succeeded when it forwarded nothing.
+// JSON-RPC ERROR, code -32602, with the echoed id — NOT a lying empty CallToolResult
+// "success" (a false success is worse than an error). The served tools now project to
+// an exec, so this uses an UNPROJECTED name (the remaining create-only case: an
+// off-surface tool a caller sends directly).
 //
 // Red-probe: the prior arm wrote a no-error {"jsonrpc":"2.0"}, so the error/code
 // assertions red.
@@ -86,7 +91,7 @@ func TestUnimplementedToolIsWellFormedError(t *testing.T) {
 	h := acceptingHandler(t, fwd, nil)
 
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-good",
-		`{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"name":"view","arguments":{"description":"d","path":"/tmp/a"}}}`)
+		`{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{"name":"not_a_real_tool","arguments":{"x":"y"}}}`)
 
 	var resp jsonRPCResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

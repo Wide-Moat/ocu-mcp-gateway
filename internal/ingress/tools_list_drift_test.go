@@ -13,18 +13,18 @@ import (
 )
 
 // The gateway advertises exactly the tools it can actually serve. Advertising a tool
-// it cannot serve (no exec projection) hangs the SDK on a create-only forward — a
-// far worse failure than omitting the tool. Until the file-op tools get gateway
-// argv projections (the Q2 follow-up), the only tool the gateway serves end-to-end
-// is bash_tool. sub_agent is a permanent non-goal (the OCU fleet does not run the
-// agent loop — MANIFESTO v1), so it is never advertised. This drift-guard pins the
-// advertised set so re-adding a tool WITHOUT a working projection reds here.
+// it cannot serve (no exec projection) returns a create-only -32602 and the model
+// silently falls back — a worse experience than a tool that executes. A tool is
+// advertised in the SAME change that gives it a working gateway exec projection. The
+// serving set is bash_tool plus the file tools (create_file, view, str_replace),
+// which project to a guest interpreter script (the Q2 file-tool projections).
+// sub_agent is a permanent non-goal (the OCU fleet does not run the agent loop —
+// MANIFESTO v1), so it is never advertised. This drift-guard pins the advertised set.
 
-// expectedAdvertisedTools is the frozen set tools/list must advertise. It is
-// bash_tool ONLY today; a tool is added here in the SAME change that gives it a
-// working gateway projection, never before (advertising a non-functional tool
-// hangs the client).
-var expectedAdvertisedTools = []string{"bash_tool"}
+// expectedAdvertisedTools is the frozen set tools/list must advertise: the tools with
+// a working gateway exec projection. A tool is added here in the SAME change that
+// gives it a projection, never before, and sub_agent is never added (non-goal).
+var expectedAdvertisedTools = []string{"bash_tool", "create_file", "str_replace", "view"}
 
 // TestToolsListIsExpectedSetOnly is the drift-guard keystone: the advertised
 // tools/list set MUST equal expectedAdvertisedTools exactly. Re-adding str_replace/
