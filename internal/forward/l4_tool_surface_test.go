@@ -6,6 +6,7 @@ package forward
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -374,5 +375,75 @@ func TestL4ViewBinaryFileDoesNotCrash(t *testing.T) {
 	// pinned (that is interpreter-dependent), only that it did not error.
 	if len(shape.Content) != 1 {
 		t.Errorf("view of a binary file must still return a single content block, got %+v", shape.Content)
+	}
+}
+
+// @L4 @sequence @routing — the four tools called in ONE chat all address the SAME
+// session identity, in order. This is the WIRE HALF of persistence: at L4 we prove
+// every exec hop carries the same session_hint (so control resolves the same session
+// row); it does NOT prove the filesystem actually persisted — that is the @L5 journey.
+//
+// The session_hint on the exec hop is the create hint (tenant + chat scope). Four calls
+// with the same principal + SessionHint must therefore send an identical, non-empty
+// session_hint on all four exec bodies, in the order the tools were called.
+func TestL4SequenceCarriesSameSessionIdentity(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on the test host; the file tools' guest runs it")
+	}
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "seq.txt")
+
+	// The four tools in one chat: bash, create_file, view, str_replace — each a real
+	// projection. Ordered as a caller would drive a create→inspect→edit flow.
+	calls := []struct {
+		name string
+		args string
+	}{
+		{"bash_tool", `{"command":"true"}`},
+		{"create_file", `{"path":` + jsonField(fpath) + `,"file_text":"ALPHA original"}`},
+		{"view", `{"path":` + jsonField(fpath) + `}`},
+		{"str_replace", `{"path":` + jsonField(fpath) + `,"old_str":"original","new_str":"EDITED"}`},
+	}
+
+	// One control server for the whole chat, recording every exec hop's session_hint in
+	// order. The exec handler still runs the real projected script (so the flow is a
+	// real create→view→edit), and appends the session_hint it saw.
+	var hints []string
+	realExec := runProjectedExec(t)
+	pki := newMTLSTestPKI(t)
+	ctl := &twoHopControl{}
+	srv := ctl.serveWith(t, pki, func(w http.ResponseWriter, body controlExecBody) {
+		hints = append(hints, body.SessionHint)
+		realExec(w, body)
+	})
+	defer srv.Close()
+
+	f := newExecForwarder(t, pki, srv.URL)
+	const chat = "chat-seq-1"
+	for _, c := range calls {
+		argv, stdin := projection.Project(c.name, []byte(c.args))
+		_, err := f.Forward(context.Background(), SessionRequest{
+			Principal:   auth.Caller{Tenant: "tenant-a"},
+			SessionHint: chat,
+			ToolCall:    ToolCall{Name: c.name, Argv: argv, Stdin: stdin},
+		})
+		if err != nil {
+			t.Fatalf("%s in the sequence must succeed at the transport, got %v", c.name, err)
+		}
+	}
+
+	if len(hints) != len(calls) {
+		t.Fatalf("expected %d exec hops, saw %d (hints=%v)", len(calls), len(hints), hints)
+	}
+	// The identity must be the create hint for this chat, non-empty, and IDENTICAL
+	// across all four hops in order.
+	want := "tenant-a/" + chat
+	for i, h := range hints {
+		if h == "" {
+			t.Errorf("exec hop %d (%s) carried an EMPTY session identity", i, calls[i].name)
+		}
+		if h != want {
+			t.Errorf("exec hop %d (%s) session identity = %q, want %q (all four must match)", i, calls[i].name, h, want)
+		}
 	}
 }
