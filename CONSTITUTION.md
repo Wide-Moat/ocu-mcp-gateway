@@ -393,21 +393,26 @@ FAIL-CLOSED refusal (a leak-free `500`), never a malformed or over-ceiling body
 handed to the caller. The valid result is then framed into the JSON-RPC envelope
 with the echoed request id.
 
-CROSS-COMPONENT SIZING INVARIANT (task #127). The gateway's F5 reply-read cap and its
-per-stream content bound MUST be reconciled with control's exec-reply ceiling, or a
-LEGAL large reply is silently lost. The exec reply carries `base64(stdout)+base64(stderr)`
-in a JSON envelope; control bounds each stream at its own ceiling
-(`controlReplyStreamCeiling`, mirroring ocu-control `defaultStdioCap`). The read cap
-`maxReplyBytes` MUST be `>= 2×ceil(ceiling×4/3) + envelope` — below it, `io.LimitReader`
-truncates the reply JSON mid-string, the parse fails, and the WHOLE result is dropped as
-a `502` (a large `bash_tool` output, or a killed command's partial output, vanishing was
-the live defect). The content bound `maxExecContentBytes` MUST be `>= ceiling` so
-`boundContent` never fires on a legal reply. When a stream IS truncated — either control
-set its wire flag (`stdout_truncated`/`stderr_truncated`) or the gateway's `boundContent`
-trimmed an over-ceiling stream — the caller is TOLD (`"[output truncated at N bytes]"`),
-never handed a clipped body that looks complete; a truncated success stays `isError:false`.
-The truncation note is synthesized in the SAME single place as the `[Exit code: N]` marker
+CROSS-COMPONENT SIZING INVARIANT (tasks #127, #128, #131). The gateway's F5 reply-read
+cap and its per-stream content bound MUST be reconciled with control's exec-reply
+ceiling, or a LEGAL large reply is silently lost. The exec reply carries
+`base64(stdout)+base64(stderr)` in a JSON envelope; control bounds each stream at its own
+ceiling (`controlReplyStreamCeiling`, mirroring ocu-control `defaultStdioCap` — 64 KiB
+since #128, bounded at the source). The read cap `maxReplyBytes` MUST be
+`>= 2×ceil(ceiling×4/3) + envelope` — below it, `io.LimitReader` truncates the reply JSON
+mid-string, the parse fails, and the WHOLE result is dropped as a `502` (a large
+`bash_tool` output vanishing was the live defect). With control's 64 KiB ceiling the
+legal max reply is ≈ 176 KiB, so `maxReplyBytes` is 256 KiB — a snug anti-hostile bound
+(the transitional 24 MiB was only needed while control still captured 8 MiB). The content
+bound `maxExecContentBytes` MUST be `>= ceiling` so `boundContent` never fires on a legal
+reply. When a stream IS truncated — either control set its wire flag
+(`stdout_truncated`/`stderr_truncated`) or the gateway's `boundContent` trimmed an
+over-ceiling stream — the caller is TOLD (`"[output truncated at N bytes]"`), never handed
+a clipped body that looks complete; a truncated success stays `isError:false`. The
+truncation note is synthesized in the SAME single place as the `[Exit code: N]` marker
 (`projectCallToolResult`) — control/guest never annotate, so the note cannot be doubled.
+(A killed/timed-out command still surfacing as a `502` is a SEPARATE control-side shaping
+defect (#129), not this size class — a zero-output timeout never reaches the read cap.)
 
 Every response frame the tool-call path writes is a WELL-FORMED JSON-RPC response
 object once the request id is known: it echoes the id and carries a result XOR an
