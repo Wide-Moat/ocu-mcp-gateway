@@ -87,17 +87,93 @@ except Exception as e:
     sys.exit(1)
 `
 
-// ViewScript reads {path} from stdin JSON and prints the target with line numbers for a
-// text file, a listing for a directory, and a "not found" error otherwise. Text is read
-// with errors='replace' so a non-UTF8 (binary) body does not raise — it is shown with
-// replacement characters rather than crashing. The image-resize path of the original
-// tool is out of scope. A read failure is an "Error: <cause>" with a non-zero exit.
+// ViewScript reads {path} from stdin JSON and prints the target. It mirrors the PoC view
+// tool (mcp_tools.py:677-778):
+//
+//   - Binary files (.xlsx/.xls/.docx/.pptx/.pdf/.zip/.tar/.gz): refuse with a targeted
+//     hint (read the SKILL.md first, or the unpack command for archives) and exit 1, so
+//     the caller sees a Tier-2 tool error whose content is the hint rather than a garbled
+//     text dump.
+//   - Images (.jpg/.jpeg/.png/.gif/.webp): open with PIL, adaptively fit to a byte budget
+//     (RAW_JPEG_BUDGET below), and emit a sentinel-framed base64 JPEG the GATEWAY turns
+//     into an image_url content block. On success (exit 0) stdout is exactly two lines:
+//     "OCU_VIEW_IMAGE_JPEG_B64 <path>" then the base64 (one line, no wrapping). When PIL
+//     is unavailable the script prints a clear text line and exits 0 - never garbled
+//     binary.
+//   - Directories: entries listed. Text files: numbered lines (errors='replace' so a
+//     non-UTF8 body does not raise). A missing path is an "Error: <cause>", exit 1.
+//
+// RAW_JPEG_BUDGET is the pre-base64 JPEG byte target. Control bounds each exec-reply
+// stream at 64 KiB (ocu-control guestexec defaultStdioCap), and base64 inflates the
+// bytes 4/3, so a 45000-byte JPEG becomes ~60000 base64 bytes and, with the sentinel
+// line + JSON framing, survives the 64 KiB reply-stream ceiling on an UNMODIFIED stand.
+// A deployment that raises the control ceiling for image quality can raise this in step.
+// The starting encode is 1280px / quality 80 (PoC parity); the loop then steps quality
+// 80->60->40, then max dimension 1280->960->640->480, until the encoded JPEG fits.
 const ViewScript = `
-import sys, json, os
+import sys, json, os, base64
+from io import BytesIO
+
+RAW_JPEG_BUDGET = 45000
+
+BINARY_HINTS = {
+    '.xlsx': 'Excel spreadsheet. Read SKILL first:\n  view /mnt/skills/public/xlsx/SKILL.md',
+    '.xls': 'Excel spreadsheet (old). Read SKILL first:\n  view /mnt/skills/public/xlsx/SKILL.md',
+    '.docx': 'Word document. Read SKILL first:\n  view /mnt/skills/public/docx/SKILL.md',
+    '.pptx': 'PowerPoint. Read SKILL first:\n  view /mnt/skills/public/pptx/SKILL.md',
+    '.pdf': 'PDF document. Read SKILL first:\n  view /mnt/skills/public/pdf/SKILL.md',
+    '.zip': 'ZIP archive. Use: unzip -l ',
+    '.tar': 'TAR archive. Use: tar -tvf ',
+    '.gz': 'Gzip file. Use: gunzip -c ',
+}
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+
+
+def render_image(path):
+    try:
+        from PIL import Image
+    except ImportError:
+        print("Image file: " + path + " (rendering unavailable: PIL missing in guest)")
+        return
+    img = Image.open(path)
+    if img.mode in ('RGBA', 'P'):
+        img = img.convert('RGB')
+    for max_dim in (1280, 960, 640, 480):
+        work = img.copy()
+        if max(work.size) > max_dim:
+            work.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        for quality in (80, 60, 40):
+            buf = BytesIO()
+            work.save(buf, format='JPEG', quality=quality)
+            data = buf.getvalue()
+            if len(data) <= RAW_JPEG_BUDGET:
+                print("OCU_VIEW_IMAGE_JPEG_B64 " + path)
+                sys.stdout.write(base64.b64encode(data).decode('ascii'))
+                return
+    print("OCU_VIEW_IMAGE_JPEG_B64 " + path)
+    sys.stdout.write(base64.b64encode(data).decode('ascii'))
+
+
 try:
     data = json.loads(sys.stdin.read())
     path = data['path']
-    if os.path.isdir(path):
+    lower = path.lower()
+    ext = None
+    for e in list(BINARY_HINTS.keys()) + list(IMAGE_EXTS):
+        if lower.endswith(e):
+            ext = e
+            break
+    if ext in IMAGE_EXTS and os.path.isfile(path):
+        render_image(path)
+    elif ext in BINARY_HINTS and os.path.isfile(path):
+        hint = BINARY_HINTS[ext]
+        if ext in ('.zip', '.tar', '.gz'):
+            hint = hint + path
+        print("Error: Cannot view binary file with 'cat'. This is a " + ext + " file.")
+        print("")
+        print(hint)
+        sys.exit(1)
+    elif os.path.isdir(path):
         entries = sorted(os.listdir(path))
         for name in entries:
             print(name)

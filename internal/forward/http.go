@@ -486,17 +486,69 @@ func mountWireFrom(m MountIntent) *mountIntentWire {
 
 // callToolResult / contentBlock are the MCP CallToolResult projection the exec hop
 // produces (matching the vendored boundedCallToolResult overlay: content text
-// blocks + the Tier-2 isError flag). The gateway emits only text content for exec
-// output. The struct is marshaled to the result bytes the ingress validates
-// against KindCallToolResult and frames into the JSON-RPC reply.
+// blocks + the Tier-2 isError flag). The gateway emits text content for exec output
+// and, for a rendered image view (D4), an image content block. The struct is marshaled
+// to the result bytes the ingress validates against KindCallToolResult (whose schema
+// permits the MCP text and image ContentBlock types) and frames into the JSON-RPC reply.
 type callToolResult struct {
 	Content []contentBlock `json:"content"`
 	IsError bool           `json:"isError"`
 }
 
+// contentBlock is one MCP ContentBlock: a text block (Type "text", Text set) or an image
+// block (Type "image_url", ImageURL set). ImageURL is a pointer so a text block omits the
+// field entirely (omitempty) rather than emitting an empty object.
 type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *imageURLRef `json:"image_url,omitempty"`
+}
+
+// imageURLRef carries the data: URL of a rendered image block.
+type imageURLRef struct {
+	URL string `json:"url"`
+}
+
+// viewImageSentinel is the first-stdout-line marker the guest ViewScript emits for a
+// rendered image (projection.ViewScript): "OCU_VIEW_IMAGE_JPEG_B64 <path>" followed by a
+// newline and the base64 JPEG. The gateway parses this on a ZERO-exit reply BEFORE any
+// truncation/bounding and turns it into a text + image_url content pair. It is a shared
+// wire contract between the guest script and this projection.
+const viewImageSentinel = "OCU_VIEW_IMAGE_JPEG_B64 "
+
+// projectImageSentinel returns a two-block image CallToolResult (text "Image: <path>" +
+// an image_url data: URL) when stdout is a well-formed image sentinel, or (nil,false) to
+// fall through to the normal text relay. Well-formed means: the first line is the
+// sentinel + a path, the second line is valid base64, and the decoded bytes begin with
+// the JPEG magic (0xFF 0xD8). A malformed sentinel (bad base64, wrong magic, no second
+// line) falls through so a corrupt/truncated reply is relayed as plain text, never as a
+// broken image block.
+func projectImageSentinel(stdout string) ([]byte, bool) {
+	if !strings.HasPrefix(stdout, viewImageSentinel) {
+		return nil, false
+	}
+	newline := strings.IndexByte(stdout, '\n')
+	if newline < 0 {
+		return nil, false
+	}
+	path := stdout[len(viewImageSentinel):newline]
+	b64 := strings.TrimSpace(stdout[newline+1:])
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) < 2 || raw[0] != 0xFF || raw[1] != 0xD8 {
+		return nil, false
+	}
+	result := callToolResult{
+		Content: []contentBlock{
+			{Type: "text", Text: "Image: " + path},
+			{Type: "image_url", ImageURL: &imageURLRef{URL: "data:image/jpeg;base64," + b64}},
+		},
+		IsError: false,
+	}
+	blob, err := json.Marshal(result)
+	if err != nil {
+		return nil, false
+	}
+	return blob, true
 }
 
 // CROSS-COMPONENT SIZING INVARIANT (task #127). The gateway's byte bounds MUST be
@@ -608,6 +660,18 @@ func projectCallToolResult(reply execResponseWire, argv []string) ([]byte, error
 	}
 
 	isErr := reply.ExitCode != 0
+
+	// D4 image sentinel: a ZERO-exit view of an image comes back as a sentinel-framed
+	// base64 JPEG (projection.ViewScript). The check runs BEFORE any truncation/bounding
+	// so the b64 is parsed whole; a malformed/truncated sentinel falls through to the
+	// normal text relay below (never a broken image block). It fires only on success -
+	// a non-zero exit is a tool error, not a render.
+	if !isErr {
+		if blob, ok := projectImageSentinel(string(stdout)); ok {
+			return blob, nil
+		}
+	}
+
 	// On a tool error the model must see the failure: relay stderr, falling back to
 	// stdout if the child wrote its diagnostic there. On success relay stdout.
 	text := string(stdout)
