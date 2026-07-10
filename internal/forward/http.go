@@ -60,7 +60,7 @@ const (
 type createBodyWire struct {
 	SessionHint  string            `json:"session_hint"`
 	Image        string            `json:"image"`
-	MountIntent  *mountIntentWire  `json:"mount_intent,omitempty"`
+	MountIntents []mountIntentWire `json:"mount_intents,omitempty"`
 	EgressPolicy *egressPolicyWire `json:"egress_policy,omitempty"`
 }
 
@@ -277,7 +277,7 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 		wire := createBodyWire{
 			SessionHint:  create.SessionHint,
 			EgressPolicy: egressWireFrom(create.EgressPolicy),
-			MountIntent:  mountWireFrom(create.MountIntent),
+			MountIntents: mountsWireFrom(create.MountIntents),
 		}
 		respBody, err := f.postJSON(ctx, token, createPath, wire)
 		if err != nil {
@@ -465,22 +465,26 @@ func egressWireFrom(e EgressPolicy) *egressPolicyWire {
 	}
 }
 
-// mountWireFrom projects the deployment MountIntent onto the wire ONLY when it
-// names a scope. Control treats a PRESENT mount_intent as requiring exactly one
-// filesystem_id XOR memory_store_id; a scope-less mount is the legitimate no-scope
-// (compute/exec) session, which is expressed by OMITTING mount_intent (ADR-0017),
-// not by sending an empty one (which Control would reject as "neither scope").
-func mountWireFrom(m MountIntent) *mountIntentWire {
-	if m.FilesystemID == "" && m.MemoryStoreID == "" {
+// mountsWireFrom projects the validated deployment mount list onto the wire.
+// Every entry names a scope (validateMounts enforced the XOR before forward),
+// so the projection is verbatim; an empty list marshals as an ABSENT
+// mount_intents field (omitempty) - the no-scope (compute/exec) session is
+// expressed by omission (ADR-0017), never by an empty mount entry.
+func mountsWireFrom(mounts []MountIntent) []mountIntentWire {
+	if len(mounts) == 0 {
 		return nil
 	}
-	return &mountIntentWire{
-		Destination:    m.Destination,
-		FilesystemID:   m.FilesystemID,
-		MemoryStoreID:  m.MemoryStoreID,
-		ReadOnly:       m.ReadOnly,
-		CacheDurationS: m.CacheDurationS,
+	wire := make([]mountIntentWire, 0, len(mounts))
+	for _, m := range mounts {
+		wire = append(wire, mountIntentWire{
+			Destination:    m.Destination,
+			FilesystemID:   m.FilesystemID,
+			MemoryStoreID:  m.MemoryStoreID,
+			ReadOnly:       m.ReadOnly,
+			CacheDurationS: m.CacheDurationS,
+		})
 	}
+	return wire
 }
 
 // callToolResult / contentBlock are the MCP CallToolResult projection the exec hop
