@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -327,7 +328,7 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 		if err := json.Unmarshal(execBody, &execReply); err != nil {
 			return SessionResponse{}, fmt.Errorf("%w: decode exec reply: %w", ErrForwardFailed, err)
 		}
-		result, err := projectCallToolResult(execReply)
+		result, err := projectCallToolResult(execReply, req.ToolCall.Argv)
 		if err != nil {
 			return SessionResponse{}, err
 		}
@@ -534,6 +535,56 @@ const (
 	maxExecContentBytes = controlReplyStreamCeiling
 )
 
+// commandSemantics maps a bash command's leading program to the exit-code semantics the
+// PoC applies (mcp_tools.py:419-426): a benign non-zero exit BELOW the threshold is
+// informational, not an error. grep/rg exit 1 = no matches; find exit 1 = partial
+// access; diff exit 1 = files differ; test/[ exit 1 = condition false. Exit >= threshold
+// (2) is a real error and is left untouched.
+type commandSemantic struct {
+	threshold uint8
+	message   string
+}
+
+var commandSemantics = map[string]commandSemantic{
+	"grep": {threshold: 2, message: "No matches found"},
+	"rg":   {threshold: 2, message: "No matches found"},
+	"find": {threshold: 2, message: "Some directories were inaccessible"},
+	"diff": {threshold: 2, message: "Files differ"},
+	"test": {threshold: 2, message: "Condition is false"},
+	"[":    {threshold: 2, message: "Condition is false"},
+}
+
+// firstCommandFromArgv extracts the leading program name from a gateway-built bash argv,
+// or "" when the argv is not the bash shape. It fires ONLY for the exact
+// ["/bin/sh","-c",cmd] shape the projection builds for bash_tool (projection.Project);
+// any other argv (a file-tool interpreter run, an empty/short argv, an unexpected shell
+// flag) returns "" so the command-semantics table can never fire on a non-bash tool.
+//
+// Because the gateway itself builds this argv, cmd is argv[2] VERBATIM - there is no
+// guessing a command out of a shell string. The tokenizer mirrors the PoC
+// _get_first_command (mcp_tools.py:429-440): split on whitespace, skip leading
+// VAR=value env assignments and the common launcher prefixes (sudo/env/nice/time/strace),
+// then return the basename of the first real token (/usr/bin/grep -> grep).
+func firstCommandFromArgv(argv []string) string {
+	if len(argv) != 3 || argv[0] != "/bin/sh" || argv[1] != "-c" {
+		return ""
+	}
+	for _, token := range strings.Fields(argv[2]) {
+		if strings.Contains(token, "=") {
+			continue
+		}
+		switch token {
+		case "sudo", "env", "nice", "time", "strace":
+			continue
+		}
+		if i := strings.LastIndex(token, "/"); i >= 0 {
+			return token[i+1:]
+		}
+		return token
+	}
+	return ""
+}
+
 // projectCallToolResult maps Control's execResponse into the MCP CallToolResult the
 // caller receives. The TWO-TIER error model (x-ocu-error-model): a NON-ZERO guest
 // exit is a Tier-2 TOOL error — isError:true with the sanitized stderr as content —
@@ -542,7 +593,11 @@ const (
 // (a []byte, never a credential); a decode failure is a fail-closed ErrForwardFailed
 // (a malformed control reply must not become a silent empty success). Output is
 // bounded (maxExecContentBytes) as defence-in-depth over control's own ceiling.
-func projectCallToolResult(reply execResponseWire) ([]byte, error) {
+//
+// argv is the gateway-built command vector the exec hop ran. It is threaded here so the
+// PoC COMMAND_SEMANTICS translation (D8) can run on the EXACT command the gateway itself
+// built (argv[2] of ["/bin/sh","-c",cmd]), never a guess.
+func projectCallToolResult(reply execResponseWire, argv []string) ([]byte, error) {
 	stdout, err := base64.StdEncoding.DecodeString(reply.StdoutB64)
 	if err != nil {
 		return nil, fmt.Errorf("%w: exec stdout_b64 is not valid base64", ErrForwardFailed)
@@ -557,28 +612,46 @@ func projectCallToolResult(reply execResponseWire) ([]byte, error) {
 	// stdout if the child wrote its diagnostic there. On success relay stdout.
 	text := string(stdout)
 	if isErr {
-		if len(stderr) > 0 {
-			text = string(stderr)
+		// COMMAND_SEMANTICS translation (D8, deploy/PARITY-LEDGER-147.md). The PoC maps a
+		// benign non-zero exit from a small command set into model-friendly text so the
+		// model does not treat a successful "no matches" grep as a failure to loop on
+		// (mcp_tools.py:443-456). We run it on argv[2] of the ["/bin/sh","-c",cmd] shape the
+		// gateway ITSELF builds (projection.Project) - so the command is the exact verbatim
+		// argument, not a guess from an opaque shell string. This REVERSES the earlier
+		// "extraction is unsound" decision: the earlier note assumed a guessed command; here
+		// the gateway is the argv author, so firstCommandFromArgv reads a known field. A tool
+		// with no bash-argv shape (a file-tool interpreter run) yields "" and never fires.
+		if sem, ok := commandSemantics[firstCommandFromArgv(argv)]; ok && reply.ExitCode < sem.threshold {
+			// This benign exit is informational, not an error: relay stdout if the command
+			// produced any, else the table message. isError flips to false and NO
+			// "[Exit code: N]" marker is added (the exit is not a failure to surface).
+			isErr = false
+			if len(stdout) > 0 {
+				text = string(stdout)
+			} else {
+				text = sem.message
+			}
 		} else {
-			text = string(stdout)
-		}
-		// A non-zero exit with NO output on EITHER stream would otherwise be an EMPTY
-		// error content block — the model would see isError:true but no reason. Surface
-		// the control-reported exit code so a silent failure is still legible, matching
-		// the PoC shape "output if output else [Exit code: N]" (mcp_tools.py:456). The
-		// gap test is RAW byte length on BOTH streams (not a trimmed/whitespace test) so
-		// it mirrors the PoC's Python truthiness exactly. This is the ONLY layer that
-		// synthesizes the marker — control/guest never do (a double-marker would be a
-		// bug); the synthesis runs BEFORE boundContent so the marker is itself bounded.
-		//
-		// The gateway relays exit-code FACTS and does NOT interpret per-command exit
-		// semantics: there is deliberately no PoC-style table rewriting a tool's exit
-		// (e.g. grep-exit-1 → "No matches found"). The isError model makes that heuristic
-		// obsolete, and guessing a command from an sh -c string in the protocol path is
-		// unsound — recorded as a PoC-vs-fleet contrast, not a bug. A signal-derived exit
-		// (e.g. 137) stays "[Exit code: 137]", not a signal name.
-		if len(stdout) == 0 && len(stderr) == 0 {
-			text = fmt.Sprintf("[Exit code: %d]", reply.ExitCode)
+			if len(stderr) > 0 {
+				text = string(stderr)
+			} else {
+				text = string(stdout)
+			}
+			// A non-zero exit with NO output on EITHER stream would otherwise be an EMPTY
+			// error content block - the model would see isError:true but no reason. Surface
+			// the control-reported exit code so a silent failure is still legible, matching
+			// the PoC shape "output if output else [Exit code: N]" (mcp_tools.py:456). The
+			// gap test is RAW byte length on BOTH streams (not a trimmed/whitespace test) so
+			// it mirrors the PoC's Python truthiness exactly. This is the ONLY layer that
+			// synthesizes the marker - control/guest never do (a double-marker would be a
+			// bug); the synthesis runs BEFORE boundContent so the marker is itself bounded.
+			//
+			// A command NOT in the table, or a real error (exit >= threshold), or a
+			// signal-derived exit (e.g. 137), stays a real error here: "[Exit code: 137]",
+			// not a signal name, isError:true.
+			if len(stdout) == 0 && len(stderr) == 0 {
+				text = fmt.Sprintf("[Exit code: %d]", reply.ExitCode)
+			}
 		}
 	}
 
