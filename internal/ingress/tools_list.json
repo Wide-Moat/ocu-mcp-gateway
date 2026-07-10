@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "bash_tool",
-      "description": "Run a bash command in the container",
+      "description": "Run a bash command in the container. Write to /home/assistant (the per-session writable workspace, wiped when the session ends) or /tmp (ephemeral scratch). Save files the user should keep or download to /mnt/user-data, where they appear in the user's Files panel.",
       "inputSchema": {
         "properties": {
           "command": {
@@ -24,7 +24,7 @@
     },
     {
       "name": "str_replace",
-      "description": "Replace a string in a file",
+      "description": "Replace a single occurrence of a string in a file. Edit files under /home/assistant (the writable workspace) or /mnt/user-data (persistent storage). The old_str must match exactly once; the edit is refused if it is missing or ambiguous.",
       "inputSchema": {
         "properties": {
           "description": {
@@ -56,7 +56,7 @@
     },
     {
       "name": "create_file",
-      "description": "Create a file with the given contents",
+      "description": "Create a file with the given contents. Use /home/assistant for per-session working files (wiped at session end) or /tmp for ephemeral scratch. Write to /mnt/user-data to save a file the user should keep or download — files there appear in the user's Files panel. The rootfs outside these paths is read-only.",
       "inputSchema": {
         "properties": {
           "description": {
@@ -83,7 +83,7 @@
     },
     {
       "name": "view",
-      "description": "View the contents of a file or directory",
+      "description": "View the contents of a file with line numbers. Read files under /home/assistant (the writable workspace), /mnt/user-data (persistent storage), or /tmp. Pass the exact file path.",
       "inputSchema": {
         "properties": {
           "description": {
