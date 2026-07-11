@@ -34,6 +34,13 @@ const (
 	// a command in the session the create hop provisioned, keyed by the SAME
 	// session_hint.
 	execPath = "/v1alpha/sessions/exec"
+	// statusPath is the Control gateway-ingress status route. It returns the
+	// audience-scoped {key, state, effective_scope} for the caller's OWN session,
+	// keyed by the SAME session_hint create used. It is the D5 scope-resolution
+	// source: the effective_scope is the per-chat storage scope control derived,
+	// scoped by session_hint (and, on the live plane, the mTLS SAN), so a caller
+	// reads only its own chat's scope.
+	statusPath = "/v1alpha/sessions/status"
 )
 
 // createBodyWire is the EXACT JSON shape the Control gateway-ingress createBody
@@ -90,13 +97,28 @@ type destroyBodyWire struct {
 	SessionHint string `json:"session_hint"`
 }
 
-// sessionResponseWire is the Control gateway-ingress reply: the host-derived key
-// and the numeric lifecycle state, and nothing else. The gateway surfaces ONLY the
-// key as a stable correlation handle to the caller (identifier-minimization,
-// invariant #5); the state is not relayed as caller-addressable authority.
+// sessionResponseWire is the Control gateway-ingress reply on the create AND status
+// routes: the host-derived key, the numeric lifecycle state, and (status only) the
+// audience-scoped effective_scope. The gateway surfaces ONLY the key as a stable
+// correlation handle to the caller (identifier-minimization, invariant #5); the
+// state is not relayed as caller-addressable authority. EffectiveScope is empty on
+// a create reply (create returns no scope) and carries the derived per-chat storage
+// scope on a status reply; it is the ONE field the resolve_scope tool projects to
+// the D5 client, and an ABSENT/empty scope is a legitimate derive-off value the
+// client degrades on (never fabricated by the gateway).
 type sessionResponseWire struct {
-	Key   string `json:"key"`
-	State int    `json:"state"`
+	Key            string `json:"key"`
+	State          int    `json:"state"`
+	EffectiveScope string `json:"effective_scope"`
+}
+
+// statusBodyWire is the Control gateway-ingress status body: a session hint that
+// ADDRESSES the caller's OWN session through the host-derived binding, exactly like
+// the destroy body. It is a hint, never authority (NFR-SEC-43) - a foreign hint
+// yields not-found/empty, never another tenant's scope. Control additionally scopes
+// on the mTLS SAN, so the effective_scope is audience-bound to the caller.
+type statusBodyWire struct {
+	SessionHint string `json:"session_hint"`
 }
 
 // execBodyWire is the EXACT JSON shape Control's gateway-ingress execBody decodes
@@ -290,6 +312,34 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 			return SessionResponse{}, fmt.Errorf("%w: decode create reply: %w", ErrForwardFailed, err)
 		}
 
+		// (2nd hop, D5 SCOPE) resolve_scope - the per-chat storage-scope resolution
+		// leg. It is a SYNTHETIC MCP tool (no guest exec projection, so it has no
+		// argv) that rides the SAME tools/call pipeline (bearer auth, ceiling, audit)
+		// whole. The create hop above already ensured the per-chat session (control
+		// resumes/creates it, solving the fresh-chat case); this hop asks control for
+		// the session's audience-scoped effective_scope by the SAME session_hint create
+		// used, then projects it into a single-text CallToolResult {"effective_scope":
+		// "<scope>"}. A non-2xx status is a fail-closed ErrForwardFailed (the scope is
+		// UNKNOWN, not empty) - never a fabricated empty scope, which would silently
+		// degrade the D5 client to base on a transient control fault. An empty scope on
+		// a 200 IS relayed verbatim: it is control's legitimate derive-off value the
+		// client degrades on by its own choice.
+		if req.ToolCall.Name == "resolve_scope" {
+			statusBody, err := f.postJSON(ctx, token, statusPath, statusBodyWire{SessionHint: create.SessionHint})
+			if err != nil {
+				return SessionResponse{}, err
+			}
+			var status sessionResponseWire
+			if err := json.Unmarshal(statusBody, &status); err != nil {
+				return SessionResponse{}, fmt.Errorf("%w: decode status reply: %w", ErrForwardFailed, err)
+			}
+			result, err := projectScopeResult(status.EffectiveScope)
+			if err != nil {
+				return SessionResponse{}, err
+			}
+			return SessionResponse{Correlation: reply.Key, Result: result}, nil
+		}
+
 		// (2nd hop) EXEC — the G2 exec-driver leg. The create hop provisioned the
 		// session; the exec hop runs the caller's command IN it and captures the
 		// guest child's output. It addresses the session by the SAME session_hint
@@ -422,11 +472,13 @@ func (f *ControlForwarder) Identity() ServiceIdentity {
 // (proto SessionSetup.Route). It is a FAIL-CLOSED SEAM STUB, and deliberately so:
 // the canon RouteResponse{control_endpoint} needs a PER-SESSION control endpoint,
 // which is the address of the exec channel — and Control does not yet expose one.
-// The Control gateway-ingress /v1alpha/sessions/status returns {key, state}, NOT a
-// control_endpoint, so resolving Route through status would return the wrong
-// contract (a key/state where an endpoint is owed). The per-session control_endpoint
-// appears when Control implements the exec-driver (the G2 exec-driver wave, ADR-0024
-// / NFR-IC-05); Route correctly comes alive then, over the same mTLS transport. Until
+// The Control gateway-ingress /v1alpha/sessions/status returns {key, state,
+// effective_scope} (the D5 scope-resolution reply the resolve_scope tool reads),
+// NOT a control_endpoint, so resolving Route through status would return the wrong
+// contract (a scope/key/state where an endpoint is owed). The per-session
+// control_endpoint appears when Control implements the exec-driver (the G2
+// exec-driver wave, ADR-0024 / NFR-IC-05); Route correctly comes alive then, over
+// the same mTLS transport. Until
 // then it refuses rather than fabricating an endpoint.
 func (f *ControlForwarder) Route(_ context.Context, _ CreateRequest) (CreateResponse, error) {
 	return CreateResponse{}, fmt.Errorf("%w: Route returns when Control exposes a per-session control_endpoint (G2 exec-driver, ADR-0024); status returns key/state, not an endpoint", ErrForwardFailed)
@@ -751,6 +803,38 @@ func projectCallToolResult(reply execResponseWire, argv []string) ([]byte, error
 	blob, err := json.Marshal(result)
 	if err != nil {
 		return nil, fmt.Errorf("%w: marshal CallToolResult: %w", ErrForwardFailed, err)
+	}
+	return blob, nil
+}
+
+// scopeContent is the JSON document the resolve_scope text block carries: the single
+// effective_scope field the D5 client reads. It is marshaled INTO the text of a
+// CallToolResult content block (a text block whose body is itself JSON), so the tool
+// rides the ordinary text-content projection - no new content type, no schema change.
+type scopeContent struct {
+	EffectiveScope string `json:"effective_scope"`
+}
+
+// projectScopeResult maps control's audience-scoped effective_scope into the MCP
+// CallToolResult the resolve_scope tool returns: a single text content block whose
+// text is the JSON {"effective_scope":"<scope>"}, isError:false. An EMPTY scope is a
+// legitimate value (control's derive-off / no-scope case) and is relayed verbatim as
+// {"effective_scope":""} - the D5 client degrades to base on that by its own choice;
+// the gateway never fabricates a base scope of its own (a fabrication would hide a
+// real derive-off from the client). The projection mirrors the exec-result text-block
+// shape (projectCallToolResult): one text block, isError:false.
+func projectScopeResult(effectiveScope string) ([]byte, error) {
+	inner, err := json.Marshal(scopeContent{EffectiveScope: effectiveScope})
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal scope content: %w", ErrForwardFailed, err)
+	}
+	result := callToolResult{
+		Content: []contentBlock{{Type: "text", Text: string(inner)}},
+		IsError: false,
+	}
+	blob, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal resolve_scope CallToolResult: %w", ErrForwardFailed, err)
 	}
 	return blob, nil
 }
