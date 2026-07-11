@@ -37,9 +37,13 @@ func TestLoadProvisioningPolicyMapsWireShape(t *testing.T) {
 	if got.WorkloadTrustProfile != forward.WorkloadTrustProfileInternalWorkforce {
 		t.Errorf("profile: got %d, want InternalWorkforce", got.WorkloadTrustProfile)
 	}
-	if got.MountIntent.Destination != "/workspace" || got.MountIntent.FilesystemID != "fs-1" ||
-		got.MountIntent.MemoryStoreID != "" || got.MountIntent.ReadOnly || got.MountIntent.CacheDurationS != 30 {
-		t.Errorf("mount intent mismapped: %+v", got.MountIntent)
+	if len(got.MountIntents) != 1 {
+		t.Fatalf("mount intents: got %d entries, want 1 (the legacy singular maps to a one-element list)", len(got.MountIntents))
+	}
+	m := got.MountIntents[0]
+	if m.Destination != "/workspace" || m.FilesystemID != "fs-1" ||
+		m.MemoryStoreID != "" || m.ReadOnly || m.CacheDurationS != 30 {
+		t.Errorf("mount intent mismapped: %+v", m)
 	}
 	if !got.EgressPolicy.DefaultDeny || got.EgressPolicy.AllowedUpstream != "object-store" || got.EgressPolicy.FilesystemID != "fs-1" {
 		t.Errorf("egress policy mismapped: %+v", got.EgressPolicy)
@@ -130,5 +134,53 @@ func TestLoadProvisioningPolicyMapsExecTimeout(t *testing.T) {
 	}
 	if got2.ExecTimeoutSeconds != 0 {
 		t.Errorf("an absent exec_timeout_seconds must map to 0 (use-default), got %d", got2.ExecTimeoutSeconds)
+	}
+}
+
+// twoMountPolicyJSON is the ADR-0029 two-mount layout: uploads RO + outputs RW
+// over one filesystem scope.
+const twoMountPolicyJSON = `{
+  "workload_trust_profile": "internal_workforce",
+  "mount_intents": [
+    {"destination": "/mnt/user-data/uploads", "filesystem_id": "fs-1", "read_only": true},
+    {"destination": "/mnt/user-data/outputs", "filesystem_id": "fs-1", "read_only": false}
+  ],
+  "egress_policy": {"default_deny": true, "allowed_upstream": "object-store", "filesystem_id": "fs-1"},
+  "resource_caps": {"cpu_cores": 1.0, "memory_bytes": 536870912, "pids_limit": 512}
+}`
+
+// TestLoadProvisioningPolicyPluralMounts pins the plural mount_intents shape:
+// both entries load, in order, with their own RO posture.
+func TestLoadProvisioningPolicyPluralMounts(t *testing.T) {
+	got, err := LoadProvisioningPolicy(writePolicy(t, twoMountPolicyJSON))
+	if err != nil {
+		t.Fatalf("LoadProvisioningPolicy: %v", err)
+	}
+	if len(got.MountIntents) != 2 {
+		t.Fatalf("mount intents: got %d entries, want 2", len(got.MountIntents))
+	}
+	up, out := got.MountIntents[0], got.MountIntents[1]
+	if up.Destination != "/mnt/user-data/uploads" || !up.ReadOnly || up.FilesystemID != "fs-1" {
+		t.Errorf("uploads entry mismapped: %+v", up)
+	}
+	if out.Destination != "/mnt/user-data/outputs" || out.ReadOnly || out.FilesystemID != "fs-1" {
+		t.Errorf("outputs entry mismapped: %+v", out)
+	}
+}
+
+// TestLoadProvisioningPolicyRefusesBothMountShapes pins the exclusivity rule:
+// a config setting the legacy singular AND the plural list is ambiguous and
+// reds the load (operator-authored config fails closed at boot).
+func TestLoadProvisioningPolicyRefusesBothMountShapes(t *testing.T) {
+	const both = `{
+  "workload_trust_profile": "internal_workforce",
+  "mount_intent": {"destination": "/a", "filesystem_id": "fs-1"},
+  "mount_intents": [{"destination": "/b", "filesystem_id": "fs-1"}],
+  "egress_policy": {"default_deny": true, "allowed_upstream": "object-store", "filesystem_id": "fs-1"},
+  "resource_caps": {"cpu_cores": 1.0, "memory_bytes": 536870912, "pids_limit": 512}
+}`
+	_, err := LoadProvisioningPolicy(writePolicy(t, both))
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("both mount shapes must red the load, got %v", err)
 	}
 }

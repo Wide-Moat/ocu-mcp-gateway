@@ -47,15 +47,14 @@ func LoadProvisioningPolicy(path string) (forward.ProvisioningPolicy, error) {
 		return forward.ProvisioningPolicy{}, fmt.Errorf("config: provisioning policy %q: %w", path, err)
 	}
 
+	mounts, err := mountsFromWire(wire)
+	if err != nil {
+		return forward.ProvisioningPolicy{}, fmt.Errorf("config: provisioning policy %q: %w", path, err)
+	}
+
 	return forward.ProvisioningPolicy{
 		WorkloadTrustProfile: profile,
-		MountIntent: forward.MountIntent{
-			Destination:    wire.MountIntent.Destination,
-			FilesystemID:   wire.MountIntent.FilesystemID,
-			MemoryStoreID:  wire.MountIntent.MemoryStoreID,
-			ReadOnly:       wire.MountIntent.ReadOnly,
-			CacheDurationS: wire.MountIntent.CacheDurationS,
-		},
+		MountIntents:         mounts,
 		EgressPolicy: forward.EgressPolicy{
 			DefaultDeny:     wire.EgressPolicy.DefaultDeny,
 			AllowedUpstream: wire.EgressPolicy.AllowedUpstream,
@@ -77,13 +76,11 @@ func LoadProvisioningPolicy(path string) (forward.ProvisioningPolicy, error) {
 // any attempt to add one in config without a code change.
 type provisioningWire struct {
 	WorkloadTrustProfile string `json:"workload_trust_profile"`
-	MountIntent          struct {
-		Destination    string `json:"destination"`
-		FilesystemID   string `json:"filesystem_id"`
-		MemoryStoreID  string `json:"memory_store_id"`
-		ReadOnly       bool   `json:"read_only"`
-		CacheDurationS uint32 `json:"cache_duration_s"`
-	} `json:"mount_intent"`
+	// MountIntent is the LEGACY singular shape: exactly one storage mount. It
+	// maps to a one-element mount list. mount_intents supersedes it (the ADR-0029
+	// two-mount layout: uploads RO + outputs RW); setting BOTH is a config error.
+	MountIntent  *mountIntentEntry  `json:"mount_intent"`
+	MountIntents []mountIntentEntry `json:"mount_intents"`
 	EgressPolicy struct {
 		DefaultDeny     bool   `json:"default_deny"`
 		AllowedUpstream string `json:"allowed_upstream"`
@@ -116,4 +113,42 @@ func profileFromWire(s string) (forward.WorkloadTrustProfile, error) {
 	default:
 		return forward.WorkloadTrustProfileUnspecified, fmt.Errorf("workload_trust_profile %q is not in the closed vocabulary {trusted_operator, internal_workforce}", s)
 	}
+}
+
+// mountIntentEntry is the on-disk shape of one storage mount (snake_case,
+// mirroring the vendored proto vocabulary like the rest of the wire struct).
+type mountIntentEntry struct {
+	Destination    string `json:"destination"`
+	FilesystemID   string `json:"filesystem_id"`
+	MemoryStoreID  string `json:"memory_store_id"`
+	ReadOnly       bool   `json:"read_only"`
+	CacheDurationS uint32 `json:"cache_duration_s"`
+}
+
+// mountsFromWire resolves the singular-vs-plural mount fields into one list.
+// The two fields are mutually exclusive: the singular is the legacy one-mount
+// shape and maps to a one-element list; a config setting both is ambiguous and
+// reds the load (fail-closed - this file is operator-authored deployment
+// config). Per-entry admissibility (scope XOR, destination shape, uniqueness)
+// is validated once by the guarded forwarder constructor, the single
+// validation source, like every other policy field.
+func mountsFromWire(wire provisioningWire) ([]forward.MountIntent, error) {
+	if wire.MountIntent != nil && len(wire.MountIntents) > 0 {
+		return nil, fmt.Errorf("mount_intent and mount_intents are mutually exclusive; use mount_intents")
+	}
+	entries := wire.MountIntents
+	if wire.MountIntent != nil {
+		entries = []mountIntentEntry{*wire.MountIntent}
+	}
+	mounts := make([]forward.MountIntent, 0, len(entries))
+	for _, e := range entries {
+		mounts = append(mounts, forward.MountIntent{
+			Destination:    e.Destination,
+			FilesystemID:   e.FilesystemID,
+			MemoryStoreID:  e.MemoryStoreID,
+			ReadOnly:       e.ReadOnly,
+			CacheDurationS: e.CacheDurationS,
+		})
+	}
+	return mounts, nil
 }

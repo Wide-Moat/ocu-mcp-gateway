@@ -150,14 +150,15 @@ func (p *mTLSTestPKI) serverTLSConfig() *tls.Config {
 // controlCreateBody mirrors ocu-control's gateway-ingress createBody (serve.go:300):
 // the fields the JSON create wire carries, decoded with DisallowUnknownFields on
 // the control side. control accepts {session_hint, image, mount_intent,
-// egress_policy} and NO control_pub_key (that field was refused on the live
-// control — DisallowUnknownFields 400 — and does not exist in createBody). The
-// gateway must send exactly these and project mount/egress from its deployment
-// provisioning so control can materialize.
+// mount_intents, egress_policy} and NO control_pub_key (that field was refused on
+// the live control — DisallowUnknownFields 400 — and does not exist in
+// createBody). The gateway emits the plural mount_intents list (the ADR-0029
+// two-mount layout); the singular stays only as control's accepted legacy input.
 type controlCreateBody struct {
 	SessionHint  string             `json:"session_hint"`
 	Image        string             `json:"image"`
 	MountIntent  *controlMountBody  `json:"mount_intent"`
+	MountIntents []controlMountBody `json:"mount_intents"`
 	EgressPolicy *controlEgressBody `json:"egress_policy"`
 }
 
@@ -271,13 +272,19 @@ func TestForwardLiveRoundTrip(t *testing.T) {
 	if !gotBody.EgressPolicy.DefaultDeny {
 		t.Errorf("egress_policy.default_deny must be projected true from provisioning, got false")
 	}
-	// The mount_intent is projected when the provisioning names a scope (control
-	// requires exactly one filesystem_id XOR memory_store_id for a PRESENT mount).
+	// The mounts are projected as the plural mount_intents list; the legacy
+	// singular field must stay ABSENT (control would reject a body setting both).
 	if gotBody.MountIntent != nil {
-		hasFS := gotBody.MountIntent.FilesystemID != ""
-		hasMem := gotBody.MountIntent.MemoryStoreID != ""
+		t.Errorf("the gateway must not emit the legacy singular mount_intent, got %+v", gotBody.MountIntent)
+	}
+	if len(gotBody.MountIntents) == 0 {
+		t.Error("mount_intents must be projected from the deployment provisioning")
+	}
+	for _, m := range gotBody.MountIntents {
+		hasFS := m.FilesystemID != ""
+		hasMem := m.MemoryStoreID != ""
 		if hasFS == hasMem {
-			t.Errorf("a PRESENT mount_intent must name exactly one scope (filesystem_id XOR memory_store_id), got fs=%q mem=%q", gotBody.MountIntent.FilesystemID, gotBody.MountIntent.MemoryStoreID)
+			t.Errorf("every mount_intents entry must name exactly one scope (filesystem_id XOR memory_store_id), got fs=%q mem=%q", m.FilesystemID, m.MemoryStoreID)
 		}
 	}
 
