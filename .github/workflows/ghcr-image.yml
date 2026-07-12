@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+name: ghcr-image
+
+# Publishes the gateway container image to GHCR and signs it in the same run.
+# Until this workflow existed the fleet assembly consumed a hand-built local
+# image - unpullable, unreproducible, unsigned; this is the publish pipeline
+# that replaces it.
+#
+# Push to main and tags only: the per-PR image build already runs in
+# security.yml (the trivy image scan builds the same Dockerfile), so a PR leg
+# here would duplicate it without adding a gate. Every pushed image is
+# cosign-signed and SPDX-SBOM-attested by its exact digest via a needs:-gated
+# job - no publish trigger exists that skips signing.
+#
+# The image carries no semver build-arg: the daemon's revision is the
+# negotiated MCP date string (NFR-IC-04), so - unlike control - there is no
+# main.version symbol to stamp (see the Dockerfile header).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ghcr-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # packages:write only here, only for the registry push.
+      packages: write
+    outputs:
+      # The pushed image digest (sha256:...), consumed by sign-image below.
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: derive the image tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          # metadata-action lowercases the repository name for the OCI ref.
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            # Extract a v* tag name verbatim; the gateway has no semver of its
+            # own (NFR-IC-04), so no semver pattern is derived.
+            type=match,pattern=v(.*),group=1
+            type=sha,format=long
+      - name: build and push linux/amd64 + linux/arm64
+        id: push
+        # The Dockerfile cross-compiles in the builder stage (Go, no QEMU tax)
+        # and ships distroless-static; both platforms publish under one index.
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  sign-image:
+    # Signing is needs:-gated on the push: what gets signed is exactly the
+    # digest THIS run pushed, on every trigger that pushes. The job is
+    # separate from the build so the OIDC token never coexists with the
+    # build steps in one job environment.
+    needs: ghcr-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # packages:write lets cosign push the signature and the SBOM
+      # attestation next to the image; id-token:write mints the OIDC token
+      # keyless signing exchanges for a short-lived Fulcio certificate - no
+      # long-lived signing key exists.
+      packages: write
+      id-token: write
+    steps:
+      - name: install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: cosign keyless sign + SPDX attest - by digest
+        env:
+          DIGEST: ${{ needs.ghcr-image.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Fail loudly if the push exported no digest: an unsigned image on
+          # the registry must always mean a red run.
+          [ -n "$DIGEST" ] || { echo "the ghcr-image job exported no digest - refusing to leave a pushed image unsigned" >&2; exit 1; }
+          # OCI references must be lowercase; github.repository preserves the
+          # org's original case.
+          ref="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')@${DIGEST}"
+          cosign sign --yes "$ref"
+          syft "$ref" -o spdx-json > sbom.spdx.json
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$ref"
