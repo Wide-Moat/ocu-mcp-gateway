@@ -79,22 +79,27 @@ func TestToolDescriptionsSteerToWritablePaths(t *testing.T) {
 	}
 }
 
-// TestToolDescriptionsDoNotPromiseDirListing pins the negative contract: no description
-// tells the model it can LIST the contents of /mnt/user-data — a directory listing there
-// is broken until a later change lands, so promising it would make the model issue a
-// call the fleet cannot serve. The check is conservative: the string "/mnt/user-data"
-// must not appear next to a listing verb (ls, list, browse) in any description.
-func TestToolDescriptionsDoNotPromiseDirListing(t *testing.T) {
+// TestToolDescriptionsUseTwoDirContract pins the negative contract of the two-mount
+// guest layout: every /mnt/user-data mention in a description MUST name one of the
+// two real mountpoints (/mnt/user-data/uploads, the user's read-only upload area, or
+// /mnt/user-data/outputs, the deliverable sink the user's Files panel serves). A BARE
+// /mnt/user-data is the retired flat single-mount contract: steering the model there
+// writes to a directory that is only a mount parent, so the file never reaches the
+// user - a false contract that wastes turns.
+func TestToolDescriptionsUseTwoDirContract(t *testing.T) {
 	desc := toolDescriptions(t)
 	for name, d := range desc {
-		lower := strings.ToLower(d)
-		if !strings.Contains(lower, "/mnt/user-data") {
-			continue
-		}
-		for _, verb := range []string{"ls /mnt/user-data", "list /mnt/user-data", "list the contents of /mnt/user-data", "browse /mnt/user-data", "ls the"} {
-			if strings.Contains(lower, verb) {
-				t.Errorf("%s description promises a /mnt/user-data directory listing (%q), which the fleet cannot yet serve; description=%q", name, verb, d)
+		rest := d
+		for {
+			i := strings.Index(rest, "/mnt/user-data")
+			if i < 0 {
+				break
 			}
+			tail := rest[i+len("/mnt/user-data"):]
+			if !strings.HasPrefix(tail, "/uploads") && !strings.HasPrefix(tail, "/outputs") {
+				t.Errorf("%s description names a BARE /mnt/user-data (the retired flat layout); every mention must be /mnt/user-data/uploads or /mnt/user-data/outputs; description=%q", name, d)
+			}
+			rest = tail
 		}
 	}
 }
