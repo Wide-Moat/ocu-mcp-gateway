@@ -693,6 +693,45 @@ func firstCommandFromArgv(argv []string) string {
 	return ""
 }
 
+// isSingleSimpleCommand reports whether cmd is a SINGLE simple command with no shell
+// control operator, so the D8 command-semantics remap can be applied to its exit code
+// safely. The remap keys on the FIRST command's benign-exit semantics (a "no match"
+// grep exits 1); applying it to a COMPOUND line would misread the exit of a LATER
+// command as the first command's benign exit. Example: `grep -q foo f; false` exits 1
+// from the trailing `false`, but firstCommandFromArgv returns grep, so without this
+// guard the remap would flip a real failure to success. Any shell control operator --
+// ; & && || | newline -- or a command substitution ( $( or a backtick ) that can wrap
+// a second command whose exit becomes the line's exit, disqualifies the remap. This is
+// conservative by design: a compound line simply keeps the honest Tier-2 exit-code
+// error, never a masked success.
+func isSingleSimpleCommand(cmd string) bool {
+	// A backtick or $(...) can embed a command whose failure becomes the exit.
+	if strings.ContainsAny(cmd, "`\n") || strings.Contains(cmd, "$(") {
+		return false
+	}
+	// Scan for the unquoted shell control operators ; & | (which cover && and ||).
+	// A quoted operator (inside '...' or "...") is data, not a separator, so track the
+	// quote state and only reject an operator seen OUTSIDE quotes.
+	var inSingle, inDouble bool
+	for _, r := range cmd {
+		switch r {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case ';', '&', '|':
+			if !inSingle && !inDouble {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // projectCallToolResult maps Control's execResponse into the MCP CallToolResult the
 // caller receives. The TWO-TIER error model (x-ocu-error-model): a NON-ZERO guest
 // exit is a Tier-2 TOOL error — isError:true with the sanitized stderr as content —
@@ -741,7 +780,10 @@ func projectCallToolResult(reply execResponseWire, argv []string) ([]byte, error
 		// "extraction is unsound" decision: the earlier note assumed a guessed command; here
 		// the gateway is the argv author, so firstCommandFromArgv reads a known field. A tool
 		// with no bash-argv shape (a file-tool interpreter run) yields "" and never fires.
-		if sem, ok := commandSemantics[firstCommandFromArgv(argv)]; ok && reply.ExitCode < sem.threshold {
+		// Guard: apply the remap ONLY to a single simple command. A compound line
+		// (grep ...; false) would let a trailing command's exit be misread as the
+		// first command's benign exit, masking a real failure as success.
+		if sem, ok := commandSemantics[firstCommandFromArgv(argv)]; ok && reply.ExitCode < sem.threshold && len(argv) == 3 && isSingleSimpleCommand(argv[2]) {
 			// This benign exit is informational, not an error: relay stdout if the command
 			// produced any, else the table message. isError flips to false and NO
 			// "[Exit code: N]" marker is added (the exit is not a failure to surface).
