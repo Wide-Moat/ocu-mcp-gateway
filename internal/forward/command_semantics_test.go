@@ -103,3 +103,35 @@ func TestCommandSemanticsSignalExitStaysMarker(t *testing.T) {
 		t.Errorf("exit 137 empty streams must keep the raw marker %q, got %+v", "[Exit code: 137]", shape.Content)
 	}
 }
+
+// A COMPOUND command whose FIRST token is a table command but whose exit comes from a
+// TRAILING command (grep -q foo f; false) must NOT have the semantics remap applied:
+// the `false` genuinely failed, so isError MUST stay true. Without the single-simple-
+// command guard, firstCommandFromArgv returns grep and 1 < grep-threshold flips a real
+// failure to success -- masking the error the model needs to see. This is the
+// regression this guard exists to prevent.
+func TestCommandSemanticsCompoundTrailingFailureStaysError(t *testing.T) {
+	cases := []string{
+		"grep -q foo f; false",   // sequence: trailing false owns exit 1
+		"grep -q foo f && false", // and-chain: trailing false owns exit 1
+		"grep foo f | wc -l",     // pipe: pipeline exit is the last stage
+		"[ -f x ] || deploy",     // or-chain with a table command lead ([)
+	}
+	for _, cmd := range cases {
+		shape := semanticsResult(t, 1, "", "", []string{"/bin/sh", "-c", cmd})
+		if !shape.IsError {
+			t.Errorf("compound command %q exit 1 must stay isError:true (a trailing command failed), got isError:false %+v", cmd, shape.Content)
+		}
+	}
+}
+
+// The guard must NOT over-block: a genuinely SINGLE simple grep with a quoted argument
+// that CONTAINS a control-operator character (grep ';' f) is still one command, so the
+// semantics remap still fires on its exit 1. A naive substring check for ';' would
+// wrongly disqualify it; the quote-aware scan keeps it eligible.
+func TestCommandSemanticsSingleGrepWithQuotedOperatorStillFires(t *testing.T) {
+	shape := semanticsResult(t, 1, "", "", []string{"/bin/sh", "-c", "grep ';' f"})
+	if shape.IsError {
+		t.Errorf("a single grep whose quoted arg contains ';' exit 1 must still fire the semantics (isError:false), got isError:true %+v", shape.Content)
+	}
+}
