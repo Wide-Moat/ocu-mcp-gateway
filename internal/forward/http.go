@@ -757,11 +757,19 @@ func projectCallToolResult(reply execResponseWire, argv []string) ([]byte, error
 	isErr := reply.ExitCode != 0
 
 	// D4 image sentinel: a ZERO-exit view of an image comes back as a sentinel-framed
-	// base64 JPEG (projection.ViewScript). The check runs BEFORE any truncation/bounding
-	// so the b64 is parsed whole; a malformed/truncated sentinel falls through to the
-	// normal text relay below (never a broken image block). It fires only on success -
-	// a non-zero exit is a tool error, not a render.
-	if !isErr {
+	// base64 JPEG (projection.ViewScript). The check runs BEFORE any bounding so the
+	// b64 is parsed whole; a malformed sentinel falls through to the normal text relay
+	// below (never a broken image block). It fires only on success - a non-zero exit
+	// is a tool error, not a render.
+	//
+	// A control-TRUNCATED stdout can never be a complete image: control clipped it at
+	// its per-stream ceiling, so the base64 is missing its tail. If the clip happened
+	// to land on a base64-valid boundary with the JPEG magic still intact,
+	// projectImageSentinel would otherwise return a SILENTLY-CLIPPED image_url with no
+	// truncation note. Skip the sentinel path on a truncated stdout so it falls through
+	// to the text relay, which surfaces the "[output truncated]" note (a clipped image
+	// is presented as clipped text, never as a whole render).
+	if !isErr && !reply.StdoutTruncated {
 		if blob, ok := projectImageSentinel(string(stdout)); ok {
 			return blob, nil
 		}

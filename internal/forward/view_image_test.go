@@ -126,3 +126,45 @@ func TestViewImageNonJPEGFallsThroughToText(t *testing.T) {
 		t.Errorf("a non-JPEG sentinel payload must fall through to a single plain-text block, got %+v", shape.Content)
 	}
 }
+
+// (h3) a control-TRUNCATED stdout, even one whose surviving prefix is a valid
+// sentinel-framed JPEG, must NOT project an image block: control clipped the
+// stream at its per-stream ceiling, so the image is incomplete. The result falls
+// through to the text relay, which appends the "[output truncated]" note, so a
+// clipped image is presented as clipped text -- never a silently-broken render.
+// Without the StdoutTruncated guard at the sentinel call site, this would return a
+// two-block image_url of a truncated JPEG with no truncation indication.
+func TestViewImageTruncatedStdoutFallsThroughToTextWithNote(t *testing.T) {
+	const path = "/mnt/user-data/outputs/big.png"
+	// A valid sentinel + valid-base64 JPEG (the magic bytes intact), but the reply
+	// is flagged truncated: the surviving bytes are only a PREFIX of the real image.
+	stdout := "OCU_VIEW_IMAGE_JPEG_B64 " + path + "\n" + base64.StdEncoding.EncodeToString(jpegBytes())
+	blob, err := projectCallToolResult(execResponseWire{
+		ExitCode:        0,
+		StdoutB64:       base64.StdEncoding.EncodeToString([]byte(stdout)),
+		StdoutTruncated: true,
+	}, []string{"/usr/bin/python3", "-c", "<viewscript>"})
+	if err != nil {
+		t.Fatalf("projectCallToolResult: %v", err)
+	}
+	var shape imageResultShape
+	if uerr := json.Unmarshal(blob, &shape); uerr != nil {
+		t.Fatalf("result must be a CallToolResult, got %q (%v)", blob, uerr)
+	}
+	// It must NOT be an image block (that would be a silently-clipped render).
+	for _, b := range shape.Content {
+		if b.Type == "image_url" {
+			t.Fatalf("a TRUNCATED sentinel stdout must NOT project an image_url block (it would be a clipped image), got %+v", shape.Content)
+		}
+	}
+	// It must be a single text block carrying the truncation note.
+	if len(shape.Content) != 1 || shape.Content[0].Type != "text" {
+		t.Fatalf("a truncated sentinel must fall through to a single text block, got %+v", shape.Content)
+	}
+	if !strings.Contains(shape.Content[0].Text, "truncated") {
+		t.Errorf("the text relay must carry the truncation note, got %q", shape.Content[0].Text)
+	}
+	if shape.IsError {
+		t.Errorf("a truncated SUCCESS is still a success (isError:false), got isError:true")
+	}
+}
