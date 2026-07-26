@@ -185,6 +185,50 @@ func TestStrReplaceScriptErrorSemantics(t *testing.T) {
 	})
 }
 
+// TestStrReplaceScriptMissingPathAndFileUnchanged pins two edge invariants the
+// three-error-semantics test does not cover: (1) a str_replace against a path that
+// does not exist takes the generic exception branch (open() raises) and exits
+// non-zero with an "Error:" line rather than crashing or silently succeeding; and
+// (2) the "on any error it leaves the file unchanged" guarantee (projection.go) holds
+// for the not-found case, not only for the ambiguous case already covered above. A
+// partial or clobbering edit on a failed replace would be silent data loss.
+func TestStrReplaceScriptMissingPathAndFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("missing path errors non-zero", func(t *testing.T) {
+		absent := filepath.Join(dir, "does-not-exist.txt")
+		payload := `{"path":` + jsonStr(absent) + `,"old_str":"a","new_str":"b"}`
+		out, code := runScript(t, projection.StrReplaceScript, payload)
+		if code == 0 {
+			t.Fatalf("str_replace on a missing path must fail non-zero, got 0 (out=%q)", out)
+		}
+		if !strings.Contains(out, "Error:") {
+			t.Errorf("a missing-path failure must print an Error: line, got %q", out)
+		}
+		// The generic branch must not have created the file as a side effect.
+		if _, err := os.Stat(absent); !os.IsNotExist(err) {
+			t.Errorf("a failed str_replace must not create the target file")
+		}
+	})
+
+	t.Run("not-found leaves the file byte-unchanged", func(t *testing.T) {
+		target := filepath.Join(dir, "keep.txt")
+		const original = "the original bytes stay put"
+		if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		payload := `{"path":` + jsonStr(target) + `,"old_str":"absent","new_str":"x"}`
+		out, code := runScript(t, projection.StrReplaceScript, payload)
+		if code == 0 {
+			t.Fatalf("not-found must fail non-zero, got 0 (out=%q)", out)
+		}
+		got, _ := os.ReadFile(target)
+		if string(got) != original {
+			t.Errorf("a not-found str_replace must leave the file unchanged; got %q, want %q", got, original)
+		}
+	})
+}
+
 // TestViewScriptNumbersLinesAndListsDirs pins view: a text file is shown with line
 // numbers; a directory is listed; a missing path errors non-zero.
 func TestViewScriptNumbersLinesAndListsDirs(t *testing.T) {

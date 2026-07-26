@@ -145,8 +145,9 @@ type CreateRequest struct {
 	// by the gateway's admission policy; must be a valid (non-Unspecified) profile
 	// or the create is refused before forward.
 	WorkloadTrustProfile WorkloadTrustProfile
-	// MountIntent is the per-session storage mount description (no auth token).
-	MountIntent MountIntent
+	// MountIntents are the per-session storage mount descriptions (no auth
+	// token), one per guest mountpoint (ADR-0029: uploads RO + outputs RW).
+	MountIntents []MountIntent
 	// EgressPolicy is the per-session egress trust-edge policy (default-deny).
 	EgressPolicy EgressPolicy
 	// ResourceCaps are the hard caps stamped on the runtime.
@@ -186,8 +187,10 @@ type ProvisioningPolicy struct {
 	// gateway provisions. It MUST be a valid (non-Unspecified) profile — a create
 	// built from an Unspecified policy is refused fail-closed before forward.
 	WorkloadTrustProfile WorkloadTrustProfile
-	// MountIntent is the per-session storage mount description (no auth token).
-	MountIntent MountIntent
+	// MountIntents are the per-session storage mount descriptions (no auth
+	// token). The deployment provisions every mount here; the create forwards
+	// them verbatim.
+	MountIntents []MountIntent
 	// EgressPolicy is the per-session egress trust-edge policy (default-deny on a
 	// production path).
 	EgressPolicy EgressPolicy
@@ -243,7 +246,7 @@ func clampExecTimeout(configured uint32) uint32 {
 func buildCreateRequest(policy ProvisioningPolicy, sessionHint string) CreateRequest {
 	return CreateRequest{
 		WorkloadTrustProfile: policy.WorkloadTrustProfile,
-		MountIntent:          policy.MountIntent,
+		MountIntents:         policy.MountIntents,
 		EgressPolicy:         policy.EgressPolicy,
 		ResourceCaps:         policy.ResourceCaps,
 		SessionHint:          sessionHint,
@@ -285,11 +288,46 @@ func (r CreateRequest) validate() error {
 	if !r.WorkloadTrustProfile.valid() {
 		return fmt.Errorf("%w: workload trust profile is unspecified/unknown (fail-closed admission)", ErrForwardFailed)
 	}
-	if !r.MountIntent.scopeValid() {
-		return fmt.Errorf("%w: mount intent must set exactly one of filesystem_id / memory_store_id", ErrForwardFailed)
+	if err := validateMounts(r.MountIntents); err != nil {
+		return err
 	}
 	if r.ResourceCaps.PIDsLimit == nil {
 		return fmt.Errorf("%w: resource caps must set a pids limit on a production create (no unset cap)", ErrForwardFailed)
+	}
+	return nil
+}
+
+// maxMountIntents caps the per-session mount list: two is the shipped layout
+// (uploads + outputs), four leaves additive room without letting a config
+// error provision an unbounded mount fan-out.
+const maxMountIntents = 4
+
+// validateMounts is the single admissibility check for the deployment mount
+// list (the guarded-forwarder validation source): the list is non-empty (a
+// storage-scoped gateway deployment must name its mounts; this preserves the
+// prior singular-mandatory behavior) and bounded, and every entry names
+// exactly one scope (the proto XOR) and an absolute, pairwise-distinct guest
+// destination - two mounts on one mountpoint would shadow each other in the
+// guest.
+func validateMounts(mounts []MountIntent) error {
+	if len(mounts) == 0 {
+		return fmt.Errorf("%w: provisioning policy names no storage mount (mount_intents is empty)", ErrForwardFailed)
+	}
+	if len(mounts) > maxMountIntents {
+		return fmt.Errorf("%w: provisioning policy names %d mounts, cap is %d", ErrForwardFailed, len(mounts), maxMountIntents)
+	}
+	seen := make(map[string]struct{}, len(mounts))
+	for _, m := range mounts {
+		if !m.scopeValid() {
+			return fmt.Errorf("%w: mount intent must set exactly one of filesystem_id / memory_store_id", ErrForwardFailed)
+		}
+		if m.Destination == "" || m.Destination[0] != '/' {
+			return fmt.Errorf("%w: mount destination %q must be an absolute guest path", ErrForwardFailed, m.Destination)
+		}
+		if _, dup := seen[m.Destination]; dup {
+			return fmt.Errorf("%w: duplicate mount destination %q", ErrForwardFailed, m.Destination)
+		}
+		seen[m.Destination] = struct{}{}
 	}
 	return nil
 }
