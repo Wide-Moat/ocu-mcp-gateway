@@ -688,6 +688,14 @@ reason, never an unbounded park.
   constraint profile (the bounded `$def`s, the numeric caps, the revision). The
   vendored copy is byte-identical to canon (its git blob OID is recorded in
   `VENDORED.md`).
+- The validator does NOT read that `contracts/` copy at runtime — it validates
+  against a SEPARATE go:embed'd copy at `internal/profile/ocu-constraints.schema.json`
+  (`internal/profile/embed.go`). `scripts/vendored_check.py` only checks the
+  `contracts/` copy against canon; it has no entry for the embedded one. A canon
+  re-pin that updates `contracts/` can silently leave the embedded copy stale (this
+  happened once — see `VENDORED.md`'s re-pin note). `internal/profile/vendored_drift_test.go`
+  is the invariant: the embedded bytes must stay byte-identical to the `contracts/`
+  copy. Re-vendor BOTH copies together on any re-pin, never just one.
 - All committed content is English only. State facts in this project's own words;
   the specs, ADRs, and the frozen contract are the only citable sources for
   behaviour.
