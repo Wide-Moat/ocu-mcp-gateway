@@ -9,8 +9,14 @@ name: go
 on:
   push:
     branches: [main]
+  # No `branches:` filter here: a PR whose base is any OTHER branch (a stacked
+  # PR onto a merge-queue integration branch) must still run every gate. A
+  # branches:[main] filter here silently skipped this whole workflow for such
+  # a PR — the CodeRabbit app check (unaffected by this filter) was the ONLY
+  # thing that ran, so a PR into consolidate/2026-07-16 carried zero of these
+  # gates while looking checked. Matches the canon security.yml convention
+  # (push: filtered, pull_request: unfiltered).
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
