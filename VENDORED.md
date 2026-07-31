@@ -144,3 +144,30 @@ carries the two-shelf `static-key`/`oauth2-rs` rule split.
 
 > NFR-SEC-87, **not** -86: -86 is taken by ADR-0026 / #307 (renderer-egress);
 > the auth floor was renumbered 86→87 in ADR-0027. The floor citation is **-87**.
+
+## CI tooling vendored from the architect's red-probe branch
+
+`scripts/check_signing_precedes_publish.py` is vendored byte-identical from the
+architect's working tree (`Wide-Moat/open-computer-use`, branch
+`canon/ci-gate-redprobe`, commit `854dceb` "test(security): fail when an image
+is published before it is signed") — NOT from the pinned `next/v1` canon
+revision above, so it is tracked separately here. It is a CI-graph checker, not
+a wire contract: it reads every `.github/workflows/*.yml` job graph and fails
+when a job publishes a consumer-reachable image reference (a public tag, a
+`docker push`) without a signing job (`cosign sign`/`attest`, SLSA
+`attest-build-provenance`) ordered strictly before it via a `needs:` edge or a
+`workflow_run` dependency. Found `release.yml`'s `ghcr-image` job doing exactly
+this on first run: it publishes (`docker/build-push-action` with `push: true`)
+without depending on `sbom-and-sign` — the same publish-before-sign class the
+architect independently found in the canon repo and in `ocu-filestore` the
+same day, three repositories with one checker.
+
+| Artifact | Source | Blob OID |
+|---|---|---|
+| `check_signing_precedes_publish.py` | `Wide-Moat/open-computer-use` @ `854dceb`, `.wt-canon/tests/security/check_signing_precedes_publish.py` | `2fa4282a94fb29fcfef85191a0f3168580db10e0` |
+
+Verify: `git hash-object scripts/check_signing_precedes_publish.py` must print
+`2fa4282a94fb29fcfef85191a0f3168580db10e0`. Not yet added to
+`scripts/vendored_check.py`'s tracked list (that gate's `VENDORED` dict is
+scoped to `contracts/` artifacts pinned to the `next/v1` revision above); this
+file's own `--self-test` is its two-sided proof instead.

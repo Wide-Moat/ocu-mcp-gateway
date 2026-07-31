@@ -199,6 +199,32 @@ jobs:
       - name: vendored-check gate (vendored copies match recorded blob OIDs)
         run: python3 scripts/vendored_check.py
 
+  signing-precedes-publish:
+    # Reads the workflow graph across .github/workflows/*.yml and fails when a
+    # job publishes a consumer-reachable image reference (a public tag, a
+    # `docker push`) without a signing job (cosign sign/attest, SLSA
+    # attest-build-provenance) ordered strictly before it via a `needs:` edge
+    # or a `workflow_run` dependency. A signature written AFTER the image is
+    # already pullable gates nothing: the reference the pipeline reports on
+    # has already been public since the publish step, and the failure
+    # retracts nothing. The self-test runs FIRST (two-sided, 7 cases both
+    # ways): it proves the check reports a violation in every case that has
+    # one and none where there is not, so a green run here is not a silent
+    # no-op. Vendored byte-identical from the architecture canon (see
+    # VENDORED.md); stdlib + PyYAML only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: install PyYAML (pinned)
+        run: pip install 'PyYAML==6.0.2'
+      - name: signing-precedes-publish self-test (RED-and-GREEN, two-sided)
+        run: python3 scripts/check_signing_precedes_publish.py --self-test
+      - name: signing-precedes-publish gate (no publish before its signer)
+        run: python3 scripts/check_signing_precedes_publish.py --workflows .github/workflows
+
   conventional-commits:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
