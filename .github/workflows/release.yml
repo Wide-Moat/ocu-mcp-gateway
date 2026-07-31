@@ -109,16 +109,22 @@ jobs:
       - name: go test -race
         run: go test -race ./... -timeout 600s
 
-  # ghcr-image builds and pushes the multi-arch distroless image and outputs
-  # its digest. NO VERSION build-arg is passed: the gateway has no semver symbol
-  # (NFR-IC-04) and the Dockerfile takes only TARGETOS/TARGETARCH. The tag flows
-  # into the OCI TAG NAME and provenance metadata ONLY, never into the build.
-  # BuildKit's built-in sbom/provenance attestations are DISABLED: they emit a
-  # different attestation format in a different location (doubling the auditor's
-  # evidence paths) and default-provenance converts a single-arch image into an
-  # OCI index, changing the digest we sign vs the digest deploy pins. The SBOM
-  # and provenance are produced by the explicit syft + attest steps below,
-  # matching the control/filestore fleet posture.
+  # ghcr-image builds and pushes the multi-arch distroless image BY DIGEST ONLY
+  # -- no tag is attached here. NO VERSION build-arg is passed: the gateway has
+  # no semver symbol (NFR-IC-04) and the Dockerfile takes only
+  # TARGETOS/TARGETARCH. BuildKit's built-in sbom/provenance attestations are
+  # DISABLED: they emit a different attestation format in a different location
+  # (doubling the auditor's evidence paths) and default-provenance converts a
+  # single-arch image into an OCI index, changing the digest we sign vs the
+  # digest deploy pins. The SBOM and provenance are produced by the explicit
+  # syft + attest steps below, matching the control/filestore fleet posture.
+  #
+  # Push BY DIGEST ONLY -- cosign signs by digest, so the push technically has
+  # to happen before the signature can exist; the invariant that matters is
+  # therefore not "sign before push" but "no reference a consumer would pull
+  # exists before the signature". A digest nobody has been told is not such a
+  # reference; a release tag is. The tag is attached later by the promote job,
+  # which runs only after signing (mirrors ocu-control's release.yml).
   ghcr-image:
     runs-on: ubuntu-latest
     needs: [tag-format, security-gates, verify]
@@ -135,29 +141,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: derive the image tags and OCI labels
+      - name: derive the OCI labels
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ghcr.io/${{ github.repository }}
-          # CalVer tag as the release image tag, plus the immutable commit sha.
-          # No semver patterns: the gateway has no semver (NFR-IC-04).
-          tags: |
-            type=raw,value=${{ github.ref_name }}
-            type=sha,format=long
-      - name: build and push linux/amd64 + linux/arm64
+      - name: build and push linux/amd64 + linux/arm64 (digest only)
         id: push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Disable BuildKit's built-in attestations: the explicit syft +
           # attest-build-provenance steps below are the fleet-consistent source,
           # and default-provenance would turn a single-arch push into an OCI
           # index, changing the signed digest. NO VERSION build-arg (NFR-IC-04).
+          # No tags: only the digest reference exists until promote runs.
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
           sbom: false
           provenance: false
 
@@ -262,13 +263,62 @@ jobs:
           path: sbom.spdx.json
           retention-days: 7
 
+  # promote attaches the human-usable tags to a digest that is ALREADY signed
+  # and attested. Splitting this out of ghcr-image is what closes the
+  # publish/sign window: until this job runs, the only way to reach the image
+  # is a digest that has not been published under any tag, so there is no
+  # reference a consumer could pull unsigned. Mirrors ocu-control's release.yml
+  # promote job exactly (same imagetools-create-on-a-signed-digest pattern).
+  #
+  # docker buildx imagetools create on a MULTI-ARCH INDEX digest (which
+  # ghcr-image's push-by-digest=true + name-canonical=true produces) preserves
+  # the index -- the new tag resolves to the same index, so every platform
+  # stays reachable under the tag. Tagging a single-platform manifest digest
+  # instead would silently drop the other architecture even on a green run.
+  promote:
+    runs-on: ubuntu-latest
+    needs: [tag-format, security-gates, verify, ghcr-image, image-scan, sbom-and-sign]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: derive the image tags
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # CalVer tag as the release image tag, plus the immutable commit sha.
+          # No semver patterns: the gateway has no semver (NFR-IC-04).
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=sha,format=long
+      - name: tag the signed digest
+        env:
+          DIGEST: ${{ needs.ghcr-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          name="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # One imagetools create per tag, all pointing at the same signed
+          # multi-arch index digest -- so a caller pulling by EITHER tag sees
+          # the identical, already-signed image.
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "tagging ${tag} -> ${name}@${DIGEST}"
+            docker buildx imagetools create --tag "$tag" "${name}@${DIGEST}"
+          done <<< "${{ steps.meta.outputs.tags }}"
+
   # release creates the GitHub Release on the tag with the verification runbook.
   # The image (with its signatures + attestations) is the artifact of record;
   # the release notes point consumers at it. No binaries are attached: the
   # gateway ships only as a distroless image.
   release:
     runs-on: ubuntu-latest
-    needs: [tag-format, security-gates, verify, ghcr-image, image-scan, sbom-and-sign]
+    needs: [tag-format, security-gates, verify, ghcr-image, image-scan, sbom-and-sign, promote]
     permissions:
       contents: write
     steps:
