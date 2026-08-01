@@ -88,7 +88,7 @@ var ErrNoServiceCredential = errors.New("forward: no gateway service credential 
 // construction, so the floor holds even if this loader is bypassed).
 func LoadMTLSConfig(caPath, certPath, keyPath string) (*tls.Config, error) {
 	if caPath == "" || certPath == "" || keyPath == "" {
-		return nil, fmt.Errorf("forward: mTLS material requires ca, client cert and client key paths — partial material is refused (NFR-SEC-37, fail-closed)")
+		return nil, errors.New("forward: mTLS material requires ca, client cert and client key paths — partial material is refused (NFR-SEC-37, fail-closed)")
 	}
 	caPEM, err := os.ReadFile(caPath)
 	if err != nil {
