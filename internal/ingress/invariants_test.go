@@ -20,7 +20,7 @@ import (
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/serialize"
 )
 
-const validToolCall = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}`
+const validToolCall = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash_tool","arguments":{"command":"true"}}}`
 
 // post builds a POST request with the given bearer/version/body, runs it through
 // h, and returns the recorder.
@@ -218,7 +218,7 @@ func TestF10_AuditActorIsHostAttested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	bodyWithClaim := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{},"caller":"admin"}}`
+	bodyWithClaim := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash_tool","arguments":{"command":"true"},"caller":"admin"}}`
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", bodyWithClaim)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("happy path must be 200, got %d", rec.Code)

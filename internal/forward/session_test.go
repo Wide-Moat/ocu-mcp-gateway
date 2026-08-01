@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -115,15 +116,15 @@ func TestCreateRefusesUnspecifiedProfile(t *testing.T) {
 func TestCreateRefusesBadMountScope(t *testing.T) {
 	// Neither scope set.
 	p := validProvisioning()
-	p.MountIntent.FilesystemID = ""
-	p.MountIntent.MemoryStoreID = ""
+	p.MountIntents[0].FilesystemID = ""
+	p.MountIntents[0].MemoryStoreID = ""
 	if err := buildCreateRequest(p, "h").validate(); !errors.Is(err, ErrForwardFailed) {
 		t.Errorf("a mount with no scope must be refused, got %v", err)
 	}
 	// Both scopes set.
 	p2 := validProvisioning()
-	p2.MountIntent.FilesystemID = "fs-1"
-	p2.MountIntent.MemoryStoreID = "mem-1"
+	p2.MountIntents[0].FilesystemID = "fs-1"
+	p2.MountIntents[0].MemoryStoreID = "mem-1"
 	if err := buildCreateRequest(p2, "h").validate(); !errors.Is(err, ErrForwardFailed) {
 		t.Errorf("a mount with both scopes must be refused, got %v", err)
 	}
@@ -221,5 +222,53 @@ func TestDestroyFailsClosedWithoutTransport(t *testing.T) {
 	}
 	if derr := noEndpoint.Destroy(context.Background(), "session-x"); !errors.Is(derr, ErrForwardFailed) {
 		t.Errorf("Destroy with no endpoint must fail closed, got %v", derr)
+	}
+}
+
+// TestCreateValidatesMountList pins the plural-mount admissibility rules the
+// guarded forwarder enforces: duplicate destinations, relative destinations,
+// an over-cap list, and an empty list are all refused fail-closed; the
+// two-mount ADR-0029 layout passes.
+func TestCreateValidatesMountList(t *testing.T) {
+	base := func() ProvisioningPolicy {
+		p := validProvisioning()
+		p.MountIntents = []MountIntent{
+			{Destination: "/mnt/user-data/uploads", FilesystemID: "fs-1", ReadOnly: true},
+			{Destination: "/mnt/user-data/outputs", FilesystemID: "fs-1", ReadOnly: false},
+		}
+		return p
+	}
+
+	if err := buildCreateRequest(base(), "h").validate(); err != nil {
+		t.Errorf("the two-mount layout must validate, got %v", err)
+	}
+
+	dup := base()
+	dup.MountIntents[1].Destination = dup.MountIntents[0].Destination
+	if err := buildCreateRequest(dup, "h").validate(); !errors.Is(err, ErrForwardFailed) {
+		t.Errorf("duplicate destinations must be refused, got %v", err)
+	}
+
+	rel := base()
+	rel.MountIntents[0].Destination = "mnt/user-data/uploads"
+	if err := buildCreateRequest(rel, "h").validate(); !errors.Is(err, ErrForwardFailed) {
+		t.Errorf("a relative destination must be refused, got %v", err)
+	}
+
+	empty := base()
+	empty.MountIntents = nil
+	if err := buildCreateRequest(empty, "h").validate(); !errors.Is(err, ErrForwardFailed) {
+		t.Errorf("an empty mount list must be refused, got %v", err)
+	}
+
+	over := base()
+	for i := 0; i < maxMountIntents; i++ {
+		over.MountIntents = append(over.MountIntents, MountIntent{
+			Destination:  fmt.Sprintf("/extra/%d", i),
+			FilesystemID: "fs-1",
+		})
+	}
+	if err := buildCreateRequest(over, "h").validate(); !errors.Is(err, ErrForwardFailed) {
+		t.Errorf("an over-cap mount list must be refused, got %v", err)
 	}
 }

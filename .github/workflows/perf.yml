@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# k6 perf-regression gate for the gateway-LOCAL /mcp handshake (wave-2 increment
+# 1). The job builds the PR (HEAD) binary and the merge-base (BASE) binary,
+# installs a PINNED k6 tarball (checksum verified before extract, no marketplace
+# action and no curl|sh), and runs scripts/perf_gate.sh, which ABAB-interleaves
+# both binaries and hands the summaries to scripts/perf_compare.py. The comparer
+# reds only on head_p95 > base_p95*1.10 AND delta > 2ms.
+#
+# ADVISORY THIS INCREMENT: the job runs continue-on-error, so a regression (or a
+# broken rig) is reported but does NOT block the merge yet. Ratcheting it to a
+# REQUIRED check is a SEPARATE, owner-gated step (drop continue-on-error, then add
+# to branch protection) - a required gate must never carry continue-on-error, or
+# it can never red (a known fake-green trap).
+name: perf
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf-k6:
+    runs-on: ubuntu-latest
+    # Advisory this increment: report the regression verdict without blocking the
+    # merge. The ratchet-to-required (drop this line, then add to branch
+    # protection) is owner-gated and NOT part of this PR.
+    continue-on-error: true
+    env:
+      # The pinned k6 release and the archive path of its binary. The checksum is
+      # committed out-of-band in test/perf/k6.pinned.sha256 and verified BEFORE
+      # extract; changing the version means changing both here and that file.
+      K6_VERSION: v0.57.0
+      K6_ARCHIVE: k6-v0.57.0-linux-amd64.tar.gz
+      K6_BINDIR: k6-v0.57.0-linux-amd64
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Full history so the merge-base with the PR target is reachable for the
+          # BASE worktree build.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: install k6 from a pinned, checksum-verified tarball
+        run: |
+          set -euo pipefail
+          # The committed checksum is the trust anchor: it is verified BEFORE the
+          # archive is ever extracted, so a tampered/substituted download is
+          # rejected before its bytes touch the filesystem as an executable. No
+          # marketplace action, no curl|sh - just a pinned URL + a committed digest.
+          expected_file="test/perf/k6.pinned.sha256"
+          url="https://github.com/grafana/k6/releases/download/${K6_VERSION}/${K6_ARCHIVE}"
+          curl -fsSL -o "${K6_ARCHIVE}" "$url"
+
+          # A two-sided self-test of the verify-before-extract guard:
+          #   (a) the pristine archive MUST pass the committed checksum;
+          #   (b) a one-byte-tampered copy MUST FAIL it (proving the guard is not
+          #       vacuous - a check that always passes protects nothing).
+          echo "::group::verify-before-extract self-test"
+          # (a) positive: the real archive matches the committed digest.
+          sha256sum -c "${expected_file}"
+          echo "self-test (a) PASS: pristine archive matches the committed checksum"
+          # (b) negative: tamper one byte and confirm the SAME check now fails.
+          cp "${K6_ARCHIVE}" tampered.tar.gz
+          printf '\x00' | dd of=tampered.tar.gz bs=1 seek=0 count=1 conv=notrunc status=none
+          tampered_line="$(sed "s/  ${K6_ARCHIVE}\$/  tampered.tar.gz/" "${expected_file}")"
+          if printf '%s\n' "$tampered_line" | sha256sum -c - >/dev/null 2>&1; then
+            echo "::error::verify-before-extract self-test FAILED: a tampered archive passed the checksum (guard is vacuous)"
+            exit 1
+          fi
+          echo "self-test (b) PASS: tampered archive is REJECTED by the same checksum"
+          rm -f tampered.tar.gz
+          echo "::endgroup::"
+
+          # Verified: extract and place k6 on PATH. Extraction happens ONLY after
+          # the pristine archive passed the committed digest above.
+          tar xzf "${K6_ARCHIVE}"
+          install -m 0755 "${K6_BINDIR}/k6" /usr/local/bin/k6
+          k6 version
+
+      - name: build HEAD (PR) gatewayd binary
+        run: |
+          set -euo pipefail
+          go build -o "${RUNNER_TEMP}/gatewayd-head" ./cmd/ocu-mcp-gatewayd
+          test -x "${RUNNER_TEMP}/gatewayd-head"
+
+      - name: build BASE (merge-base) gatewayd binary in a worktree
+        run: |
+          set -euo pipefail
+          # The BASE is the merge-base of the PR head and its target branch, so the
+          # comparison is HEAD-vs-where-it-forked, not HEAD-vs-tip (which would fold
+          # in unrelated main churn). fetch-depth 0 made the merge-base reachable.
+          base_ref="origin/${GITHUB_BASE_REF}"
+          merge_base="$(git merge-base HEAD "${base_ref}")"
+          echo "merge-base: ${merge_base}"
+          wt="${RUNNER_TEMP}/base-worktree"
+          git worktree add --detach "${wt}" "${merge_base}"
+          # Build the base binary FROM the base worktree, so it reflects the code as
+          # it was at the fork point.
+          ( cd "${wt}" && go build -o "${RUNNER_TEMP}/gatewayd-base" ./cmd/ocu-mcp-gatewayd )
+          test -x "${RUNNER_TEMP}/gatewayd-base"
+
+      - name: run the perf gate (base vs head, ABAB, min-of-rounds p95)
+        run: |
+          set -euo pipefail
+          # perf_gate.sh mints one fixture set, boots each binary with NO
+          # -control-url (so only the gateway-local handshake is measured), runs k6
+          # ABAB, and calls perf_compare.py. Exit 1 = regression, 2 = broken rig.
+          scripts/perf_gate.sh "${RUNNER_TEMP}/gatewayd-base" "${RUNNER_TEMP}/gatewayd-head"
