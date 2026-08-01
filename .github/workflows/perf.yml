@@ -41,7 +41,7 @@ jobs:
       K6_ARCHIVE: k6-v0.57.0-linux-amd64.tar.gz
       K6_BINDIR: k6-v0.57.0-linux-amd64
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so the merge-base with the PR target is reachable for the
           # BASE worktree build.
