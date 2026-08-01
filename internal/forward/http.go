@@ -527,15 +527,15 @@ func mountsWireFrom(mounts []MountIntent) []mountIntentWire {
 	if len(mounts) == 0 {
 		return nil
 	}
+	// The conversion is field-for-field identical by construction: a MountIntent
+	// that grows a field no longer converts, so the compiler — not review — is what
+	// stops a new field from reaching the wire unnoticed. Custody itself is pinned
+	// a layer up by TestForwardShapesCarryNoCredential, whose AST pass reads every
+	// struct declared in this package, so no credential-shaped field can be added
+	// to either side of this conversion without reddening that test.
 	wire := make([]mountIntentWire, 0, len(mounts))
 	for _, m := range mounts {
-		wire = append(wire, mountIntentWire{
-			Destination:    m.Destination,
-			FilesystemID:   m.FilesystemID,
-			MemoryStoreID:  m.MemoryStoreID,
-			ReadOnly:       m.ReadOnly,
-			CacheDurationS: m.CacheDurationS,
-		})
+		wire = append(wire, mountIntentWire(m))
 	}
 	return wire
 }
