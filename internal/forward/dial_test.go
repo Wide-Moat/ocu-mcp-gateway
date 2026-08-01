@@ -42,7 +42,7 @@ func validProvisioning() ProvisioningPolicy {
 	pids := int64(512)
 	return ProvisioningPolicy{
 		WorkloadTrustProfile: WorkloadTrustProfileInternalWorkforce,
-		MountIntent:          MountIntent{Destination: "/workspace", FilesystemID: "fs-1", ReadOnly: false, CacheDurationS: 30},
+		MountIntents:         []MountIntent{{Destination: "/workspace", FilesystemID: "fs-1", ReadOnly: false, CacheDurationS: 30}},
 		EgressPolicy:         EgressPolicy{DefaultDeny: true, AllowedUpstream: "object-store", FilesystemID: "fs-1"},
 		ResourceCaps:         ResourceCaps{CPUCores: 1.0, MemoryBytes: 512 << 20, PIDsLimit: &pids},
 	}

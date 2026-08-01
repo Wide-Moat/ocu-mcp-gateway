@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -33,6 +34,13 @@ const (
 	// a command in the session the create hop provisioned, keyed by the SAME
 	// session_hint.
 	execPath = "/v1alpha/sessions/exec"
+	// statusPath is the Control gateway-ingress status route. It returns the
+	// audience-scoped {key, state, effective_scope} for the caller's OWN session,
+	// keyed by the SAME session_hint create used. It is the D5 scope-resolution
+	// source: the effective_scope is the per-chat storage scope control derived,
+	// scoped by session_hint (and, on the live plane, the mTLS SAN), so a caller
+	// reads only its own chat's scope.
+	statusPath = "/v1alpha/sessions/status"
 )
 
 // createBodyWire is the EXACT JSON shape the Control gateway-ingress createBody
@@ -60,7 +68,7 @@ const (
 type createBodyWire struct {
 	SessionHint  string            `json:"session_hint"`
 	Image        string            `json:"image"`
-	MountIntent  *mountIntentWire  `json:"mount_intent,omitempty"`
+	MountIntents []mountIntentWire `json:"mount_intents,omitempty"`
 	EgressPolicy *egressPolicyWire `json:"egress_policy,omitempty"`
 }
 
@@ -89,13 +97,28 @@ type destroyBodyWire struct {
 	SessionHint string `json:"session_hint"`
 }
 
-// sessionResponseWire is the Control gateway-ingress reply: the host-derived key
-// and the numeric lifecycle state, and nothing else. The gateway surfaces ONLY the
-// key as a stable correlation handle to the caller (identifier-minimization,
-// invariant #5); the state is not relayed as caller-addressable authority.
+// sessionResponseWire is the Control gateway-ingress reply on the create AND status
+// routes: the host-derived key, the numeric lifecycle state, and (status only) the
+// audience-scoped effective_scope. The gateway surfaces ONLY the key as a stable
+// correlation handle to the caller (identifier-minimization, invariant #5); the
+// state is not relayed as caller-addressable authority. EffectiveScope is empty on
+// a create reply (create returns no scope) and carries the derived per-chat storage
+// scope on a status reply; it is the ONE field the resolve_scope tool projects to
+// the D5 client, and an ABSENT/empty scope is a legitimate derive-off value the
+// client degrades on (never fabricated by the gateway).
 type sessionResponseWire struct {
-	Key   string `json:"key"`
-	State int    `json:"state"`
+	Key            string `json:"key"`
+	State          int    `json:"state"`
+	EffectiveScope string `json:"effective_scope"`
+}
+
+// statusBodyWire is the Control gateway-ingress status body: a session hint that
+// ADDRESSES the caller's OWN session through the host-derived binding, exactly like
+// the destroy body. It is a hint, never authority (NFR-SEC-43) - a foreign hint
+// yields not-found/empty, never another tenant's scope. Control additionally scopes
+// on the mTLS SAN, so the effective_scope is audience-bound to the caller.
+type statusBodyWire struct {
+	SessionHint string `json:"session_hint"`
 }
 
 // execBodyWire is the EXACT JSON shape Control's gateway-ingress execBody decodes
@@ -277,7 +300,7 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 		wire := createBodyWire{
 			SessionHint:  create.SessionHint,
 			EgressPolicy: egressWireFrom(create.EgressPolicy),
-			MountIntent:  mountWireFrom(create.MountIntent),
+			MountIntents: mountsWireFrom(create.MountIntents),
 		}
 		respBody, err := f.postJSON(ctx, token, createPath, wire)
 		if err != nil {
@@ -287,6 +310,34 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 		var reply sessionResponseWire
 		if err := json.Unmarshal(respBody, &reply); err != nil {
 			return SessionResponse{}, fmt.Errorf("%w: decode create reply: %w", ErrForwardFailed, err)
+		}
+
+		// (2nd hop, D5 SCOPE) resolve_scope - the per-chat storage-scope resolution
+		// leg. It is a SYNTHETIC MCP tool (no guest exec projection, so it has no
+		// argv) that rides the SAME tools/call pipeline (bearer auth, ceiling, audit)
+		// whole. The create hop above already ensured the per-chat session (control
+		// resumes/creates it, solving the fresh-chat case); this hop asks control for
+		// the session's audience-scoped effective_scope by the SAME session_hint create
+		// used, then projects it into a single-text CallToolResult {"effective_scope":
+		// "<scope>"}. A non-2xx status is a fail-closed ErrForwardFailed (the scope is
+		// UNKNOWN, not empty) - never a fabricated empty scope, which would silently
+		// degrade the D5 client to base on a transient control fault. An empty scope on
+		// a 200 IS relayed verbatim: it is control's legitimate derive-off value the
+		// client degrades on by its own choice.
+		if req.ToolCall.Name == "resolve_scope" {
+			statusBody, err := f.postJSON(ctx, token, statusPath, statusBodyWire{SessionHint: create.SessionHint})
+			if err != nil {
+				return SessionResponse{}, err
+			}
+			var status sessionResponseWire
+			if err := json.Unmarshal(statusBody, &status); err != nil {
+				return SessionResponse{}, fmt.Errorf("%w: decode status reply: %w", ErrForwardFailed, err)
+			}
+			result, err := projectScopeResult(status.EffectiveScope)
+			if err != nil {
+				return SessionResponse{}, err
+			}
+			return SessionResponse{Correlation: reply.Key, Result: result}, nil
 		}
 
 		// (2nd hop) EXEC — the G2 exec-driver leg. The create hop provisioned the
@@ -327,7 +378,7 @@ func (f *ControlForwarder) Forward(ctx context.Context, req SessionRequest) (Ses
 		if err := json.Unmarshal(execBody, &execReply); err != nil {
 			return SessionResponse{}, fmt.Errorf("%w: decode exec reply: %w", ErrForwardFailed, err)
 		}
-		result, err := projectCallToolResult(execReply)
+		result, err := projectCallToolResult(execReply, req.ToolCall.Argv)
 		if err != nil {
 			return SessionResponse{}, err
 		}
@@ -421,11 +472,13 @@ func (f *ControlForwarder) Identity() ServiceIdentity {
 // (proto SessionSetup.Route). It is a FAIL-CLOSED SEAM STUB, and deliberately so:
 // the canon RouteResponse{control_endpoint} needs a PER-SESSION control endpoint,
 // which is the address of the exec channel — and Control does not yet expose one.
-// The Control gateway-ingress /v1alpha/sessions/status returns {key, state}, NOT a
-// control_endpoint, so resolving Route through status would return the wrong
-// contract (a key/state where an endpoint is owed). The per-session control_endpoint
-// appears when Control implements the exec-driver (the G2 exec-driver wave, ADR-0024
-// / NFR-IC-05); Route correctly comes alive then, over the same mTLS transport. Until
+// The Control gateway-ingress /v1alpha/sessions/status returns {key, state,
+// effective_scope} (the D5 scope-resolution reply the resolve_scope tool reads),
+// NOT a control_endpoint, so resolving Route through status would return the wrong
+// contract (a scope/key/state where an endpoint is owed). The per-session
+// control_endpoint appears when Control implements the exec-driver (the G2
+// exec-driver wave, ADR-0024 / NFR-IC-05); Route correctly comes alive then, over
+// the same mTLS transport. Until
 // then it refuses rather than fabricating an endpoint.
 func (f *ControlForwarder) Route(_ context.Context, _ CreateRequest) (CreateResponse, error) {
 	return CreateResponse{}, fmt.Errorf("%w: Route returns when Control exposes a per-session control_endpoint (G2 exec-driver, ADR-0024); status returns key/state, not an endpoint", ErrForwardFailed)
@@ -465,37 +518,93 @@ func egressWireFrom(e EgressPolicy) *egressPolicyWire {
 	}
 }
 
-// mountWireFrom projects the deployment MountIntent onto the wire ONLY when it
-// names a scope. Control treats a PRESENT mount_intent as requiring exactly one
-// filesystem_id XOR memory_store_id; a scope-less mount is the legitimate no-scope
-// (compute/exec) session, which is expressed by OMITTING mount_intent (ADR-0017),
-// not by sending an empty one (which Control would reject as "neither scope").
-func mountWireFrom(m MountIntent) *mountIntentWire {
-	if m.FilesystemID == "" && m.MemoryStoreID == "" {
+// mountsWireFrom projects the validated deployment mount list onto the wire.
+// Every entry names a scope (validateMounts enforced the XOR before forward),
+// so the projection is verbatim; an empty list marshals as an ABSENT
+// mount_intents field (omitempty) - the no-scope (compute/exec) session is
+// expressed by omission (ADR-0017), never by an empty mount entry.
+func mountsWireFrom(mounts []MountIntent) []mountIntentWire {
+	if len(mounts) == 0 {
 		return nil
 	}
-	return &mountIntentWire{
-		Destination:    m.Destination,
-		FilesystemID:   m.FilesystemID,
-		MemoryStoreID:  m.MemoryStoreID,
-		ReadOnly:       m.ReadOnly,
-		CacheDurationS: m.CacheDurationS,
+	// The conversion is field-for-field identical by construction: a MountIntent
+	// that grows a field no longer converts, so the compiler — not review — is what
+	// stops a new field from reaching the wire unnoticed. Custody itself is pinned
+	// a layer up by TestForwardShapesCarryNoCredential, whose AST pass reads every
+	// struct declared in this package, so no credential-shaped field can be added
+	// to either side of this conversion without reddening that test.
+	wire := make([]mountIntentWire, 0, len(mounts))
+	for _, m := range mounts {
+		wire = append(wire, mountIntentWire(m))
 	}
+	return wire
 }
 
 // callToolResult / contentBlock are the MCP CallToolResult projection the exec hop
 // produces (matching the vendored boundedCallToolResult overlay: content text
-// blocks + the Tier-2 isError flag). The gateway emits only text content for exec
-// output. The struct is marshaled to the result bytes the ingress validates
-// against KindCallToolResult and frames into the JSON-RPC reply.
+// blocks + the Tier-2 isError flag). The gateway emits text content for exec output
+// and, for a rendered image view (D4), an image content block. The struct is marshaled
+// to the result bytes the ingress validates against KindCallToolResult (whose schema
+// permits the MCP text and image ContentBlock types) and frames into the JSON-RPC reply.
 type callToolResult struct {
 	Content []contentBlock `json:"content"`
 	IsError bool           `json:"isError"`
 }
 
+// contentBlock is one MCP ContentBlock: a text block (Type "text", Text set) or an image
+// block (Type "image_url", ImageURL set). ImageURL is a pointer so a text block omits the
+// field entirely (omitempty) rather than emitting an empty object.
 type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *imageURLRef `json:"image_url,omitempty"`
+}
+
+// imageURLRef carries the data: URL of a rendered image block.
+type imageURLRef struct {
+	URL string `json:"url"`
+}
+
+// viewImageSentinel is the first-stdout-line marker the guest ViewScript emits for a
+// rendered image (projection.ViewScript): "OCU_VIEW_IMAGE_JPEG_B64 <path>" followed by a
+// newline and the base64 JPEG. The gateway parses this on a ZERO-exit reply BEFORE any
+// truncation/bounding and turns it into a text + image_url content pair. It is a shared
+// wire contract between the guest script and this projection.
+const viewImageSentinel = "OCU_VIEW_IMAGE_JPEG_B64 "
+
+// projectImageSentinel returns a two-block image CallToolResult (text "Image: <path>" +
+// an image_url data: URL) when stdout is a well-formed image sentinel, or (nil,false) to
+// fall through to the normal text relay. Well-formed means: the first line is the
+// sentinel + a path, the second line is valid base64, and the decoded bytes begin with
+// the JPEG magic (0xFF 0xD8). A malformed sentinel (bad base64, wrong magic, no second
+// line) falls through so a corrupt/truncated reply is relayed as plain text, never as a
+// broken image block.
+func projectImageSentinel(stdout string) ([]byte, bool) {
+	if !strings.HasPrefix(stdout, viewImageSentinel) {
+		return nil, false
+	}
+	newline := strings.IndexByte(stdout, '\n')
+	if newline < 0 {
+		return nil, false
+	}
+	path := stdout[len(viewImageSentinel):newline]
+	b64 := strings.TrimSpace(stdout[newline+1:])
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) < 2 || raw[0] != 0xFF || raw[1] != 0xD8 {
+		return nil, false
+	}
+	result := callToolResult{
+		Content: []contentBlock{
+			{Type: "text", Text: "Image: " + path},
+			{Type: "image_url", ImageURL: &imageURLRef{URL: "data:image/jpeg;base64," + b64}},
+		},
+		IsError: false,
+	}
+	blob, err := json.Marshal(result)
+	if err != nil {
+		return nil, false
+	}
+	return blob, true
 }
 
 // CROSS-COMPONENT SIZING INVARIANT (task #127). The gateway's byte bounds MUST be
@@ -534,6 +643,95 @@ const (
 	maxExecContentBytes = controlReplyStreamCeiling
 )
 
+// commandSemantics maps a bash command's leading program to the exit-code semantics the
+// PoC applies (mcp_tools.py:419-426): a benign non-zero exit BELOW the threshold is
+// informational, not an error. grep/rg exit 1 = no matches; find exit 1 = partial
+// access; diff exit 1 = files differ; test/[ exit 1 = condition false. Exit >= threshold
+// (2) is a real error and is left untouched.
+type commandSemantic struct {
+	threshold uint8
+	message   string
+}
+
+var commandSemantics = map[string]commandSemantic{
+	"grep": {threshold: 2, message: "No matches found"},
+	"rg":   {threshold: 2, message: "No matches found"},
+	"find": {threshold: 2, message: "Some directories were inaccessible"},
+	"diff": {threshold: 2, message: "Files differ"},
+	"test": {threshold: 2, message: "Condition is false"},
+	"[":    {threshold: 2, message: "Condition is false"},
+}
+
+// firstCommandFromArgv extracts the leading program name from a gateway-built bash argv,
+// or "" when the argv is not the bash shape. It fires ONLY for the exact
+// ["/bin/sh","-c",cmd] shape the projection builds for bash_tool (projection.Project);
+// any other argv (a file-tool interpreter run, an empty/short argv, an unexpected shell
+// flag) returns "" so the command-semantics table can never fire on a non-bash tool.
+//
+// Because the gateway itself builds this argv, cmd is argv[2] VERBATIM - there is no
+// guessing a command out of a shell string. The tokenizer mirrors the PoC
+// _get_first_command (mcp_tools.py:429-440): split on whitespace, skip leading
+// VAR=value env assignments and the common launcher prefixes (sudo/env/nice/time/strace),
+// then return the basename of the first real token (/usr/bin/grep -> grep).
+func firstCommandFromArgv(argv []string) string {
+	if len(argv) != 3 || argv[0] != "/bin/sh" || argv[1] != "-c" {
+		return ""
+	}
+	for _, token := range strings.Fields(argv[2]) {
+		if strings.Contains(token, "=") {
+			continue
+		}
+		switch token {
+		case "sudo", "env", "nice", "time", "strace":
+			continue
+		}
+		if i := strings.LastIndex(token, "/"); i >= 0 {
+			return token[i+1:]
+		}
+		return token
+	}
+	return ""
+}
+
+// isSingleSimpleCommand reports whether cmd is a SINGLE simple command with no shell
+// control operator, so the D8 command-semantics remap can be applied to its exit code
+// safely. The remap keys on the FIRST command's benign-exit semantics (a "no match"
+// grep exits 1); applying it to a COMPOUND line would misread the exit of a LATER
+// command as the first command's benign exit. Example: `grep -q foo f; false` exits 1
+// from the trailing `false`, but firstCommandFromArgv returns grep, so without this
+// guard the remap would flip a real failure to success. Any shell control operator --
+// ; & && || | newline -- or a command substitution ( $( or a backtick ) that can wrap
+// a second command whose exit becomes the line's exit, disqualifies the remap. This is
+// conservative by design: a compound line simply keeps the honest Tier-2 exit-code
+// error, never a masked success.
+func isSingleSimpleCommand(cmd string) bool {
+	// A backtick or $(...) can embed a command whose failure becomes the exit.
+	if strings.ContainsAny(cmd, "`\n") || strings.Contains(cmd, "$(") {
+		return false
+	}
+	// Scan for the unquoted shell control operators ; & | (which cover && and ||).
+	// A quoted operator (inside '...' or "...") is data, not a separator, so track the
+	// quote state and only reject an operator seen OUTSIDE quotes.
+	var inSingle, inDouble bool
+	for _, r := range cmd {
+		switch r {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case ';', '&', '|':
+			if !inSingle && !inDouble {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // projectCallToolResult maps Control's execResponse into the MCP CallToolResult the
 // caller receives. The TWO-TIER error model (x-ocu-error-model): a NON-ZERO guest
 // exit is a Tier-2 TOOL error — isError:true with the sanitized stderr as content —
@@ -542,7 +740,11 @@ const (
 // (a []byte, never a credential); a decode failure is a fail-closed ErrForwardFailed
 // (a malformed control reply must not become a silent empty success). Output is
 // bounded (maxExecContentBytes) as defence-in-depth over control's own ceiling.
-func projectCallToolResult(reply execResponseWire) ([]byte, error) {
+//
+// argv is the gateway-built command vector the exec hop ran. It is threaded here so the
+// PoC COMMAND_SEMANTICS translation (D8) can run on the EXACT command the gateway itself
+// built (argv[2] of ["/bin/sh","-c",cmd]), never a guess.
+func projectCallToolResult(reply execResponseWire, argv []string) ([]byte, error) {
 	stdout, err := base64.StdEncoding.DecodeString(reply.StdoutB64)
 	if err != nil {
 		return nil, fmt.Errorf("%w: exec stdout_b64 is not valid base64", ErrForwardFailed)
@@ -553,32 +755,68 @@ func projectCallToolResult(reply execResponseWire) ([]byte, error) {
 	}
 
 	isErr := reply.ExitCode != 0
+
+	// D4 image sentinel: a ZERO-exit view of an image comes back as a sentinel-framed
+	// base64 JPEG (projection.ViewScript). The check runs BEFORE any gateway bounding
+	// so the b64 is parsed whole; a malformed sentinel falls through to the normal text
+	// relay below (never a broken image block). It fires only on success - a non-zero
+	// exit is a tool error, not a render - and only on an UNTRUNCATED stdout: a
+	// control-side cut landing on a 4-char base64 boundary still decodes, so without
+	// the wire-flag guard a partial JPEG would ship as a clean render. A truncated
+	// reply takes the text path, whose truncation note tells the caller it is partial.
+	if !isErr && !reply.StdoutTruncated {
+		if blob, ok := projectImageSentinel(string(stdout)); ok {
+			return blob, nil
+		}
+	}
+
 	// On a tool error the model must see the failure: relay stderr, falling back to
 	// stdout if the child wrote its diagnostic there. On success relay stdout.
 	text := string(stdout)
 	if isErr {
-		if len(stderr) > 0 {
-			text = string(stderr)
+		// COMMAND_SEMANTICS translation (D8, deploy/PARITY-LEDGER-147.md). The PoC maps a
+		// benign non-zero exit from a small command set into model-friendly text so the
+		// model does not treat a successful "no matches" grep as a failure to loop on
+		// (mcp_tools.py:443-456). We run it on argv[2] of the ["/bin/sh","-c",cmd] shape the
+		// gateway ITSELF builds (projection.Project) - so the command is the exact verbatim
+		// argument, not a guess from an opaque shell string. This REVERSES the earlier
+		// "extraction is unsound" decision: the earlier note assumed a guessed command; here
+		// the gateway is the argv author, so firstCommandFromArgv reads a known field. A tool
+		// with no bash-argv shape (a file-tool interpreter run) yields "" and never fires.
+		// Guard: apply the remap ONLY to a single simple command. A compound line
+		// (grep ...; false) would let a trailing command's exit be misread as the
+		// first command's benign exit, masking a real failure as success.
+		if sem, ok := commandSemantics[firstCommandFromArgv(argv)]; ok && reply.ExitCode < sem.threshold && len(argv) == 3 && isSingleSimpleCommand(argv[2]) {
+			// This benign exit is informational, not an error: relay stdout if the command
+			// produced any, else the table message. isError flips to false and NO
+			// "[Exit code: N]" marker is added (the exit is not a failure to surface).
+			isErr = false
+			if len(stdout) > 0 {
+				text = string(stdout)
+			} else {
+				text = sem.message
+			}
 		} else {
-			text = string(stdout)
-		}
-		// A non-zero exit with NO output on EITHER stream would otherwise be an EMPTY
-		// error content block — the model would see isError:true but no reason. Surface
-		// the control-reported exit code so a silent failure is still legible, matching
-		// the PoC shape "output if output else [Exit code: N]" (mcp_tools.py:456). The
-		// gap test is RAW byte length on BOTH streams (not a trimmed/whitespace test) so
-		// it mirrors the PoC's Python truthiness exactly. This is the ONLY layer that
-		// synthesizes the marker — control/guest never do (a double-marker would be a
-		// bug); the synthesis runs BEFORE boundContent so the marker is itself bounded.
-		//
-		// The gateway relays exit-code FACTS and does NOT interpret per-command exit
-		// semantics: there is deliberately no PoC-style table rewriting a tool's exit
-		// (e.g. grep-exit-1 → "No matches found"). The isError model makes that heuristic
-		// obsolete, and guessing a command from an sh -c string in the protocol path is
-		// unsound — recorded as a PoC-vs-fleet contrast, not a bug. A signal-derived exit
-		// (e.g. 137) stays "[Exit code: 137]", not a signal name.
-		if len(stdout) == 0 && len(stderr) == 0 {
-			text = fmt.Sprintf("[Exit code: %d]", reply.ExitCode)
+			if len(stderr) > 0 {
+				text = string(stderr)
+			} else {
+				text = string(stdout)
+			}
+			// A non-zero exit with NO output on EITHER stream would otherwise be an EMPTY
+			// error content block - the model would see isError:true but no reason. Surface
+			// the control-reported exit code so a silent failure is still legible, matching
+			// the PoC shape "output if output else [Exit code: N]" (mcp_tools.py:456). The
+			// gap test is RAW byte length on BOTH streams (not a trimmed/whitespace test) so
+			// it mirrors the PoC's Python truthiness exactly. This is the ONLY layer that
+			// synthesizes the marker - control/guest never do (a double-marker would be a
+			// bug); the synthesis runs BEFORE boundContent so the marker is itself bounded.
+			//
+			// A command NOT in the table, or a real error (exit >= threshold), or a
+			// signal-derived exit (e.g. 137), stays a real error here: "[Exit code: 137]",
+			// not a signal name, isError:true.
+			if len(stdout) == 0 && len(stderr) == 0 {
+				text = fmt.Sprintf("[Exit code: %d]", reply.ExitCode)
+			}
 		}
 	}
 
@@ -610,6 +848,38 @@ func projectCallToolResult(reply execResponseWire) ([]byte, error) {
 	blob, err := json.Marshal(result)
 	if err != nil {
 		return nil, fmt.Errorf("%w: marshal CallToolResult: %w", ErrForwardFailed, err)
+	}
+	return blob, nil
+}
+
+// scopeContent is the JSON document the resolve_scope text block carries: the single
+// effective_scope field the D5 client reads. It is marshaled INTO the text of a
+// CallToolResult content block (a text block whose body is itself JSON), so the tool
+// rides the ordinary text-content projection - no new content type, no schema change.
+type scopeContent struct {
+	EffectiveScope string `json:"effective_scope"`
+}
+
+// projectScopeResult maps control's audience-scoped effective_scope into the MCP
+// CallToolResult the resolve_scope tool returns: a single text content block whose
+// text is the JSON {"effective_scope":"<scope>"}, isError:false. An EMPTY scope is a
+// legitimate value (control's derive-off / no-scope case) and is relayed verbatim as
+// {"effective_scope":""} - the D5 client degrades to base on that by its own choice;
+// the gateway never fabricates a base scope of its own (a fabrication would hide a
+// real derive-off from the client). The projection mirrors the exec-result text-block
+// shape (projectCallToolResult): one text block, isError:false.
+func projectScopeResult(effectiveScope string) ([]byte, error) {
+	inner, err := json.Marshal(scopeContent{EffectiveScope: effectiveScope})
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal scope content: %w", ErrForwardFailed, err)
+	}
+	result := callToolResult{
+		Content: []contentBlock{{Type: "text", Text: string(inner)}},
+		IsError: false,
+	}
+	blob, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal resolve_scope CallToolResult: %w", ErrForwardFailed, err)
 	}
 	return blob, nil
 }
