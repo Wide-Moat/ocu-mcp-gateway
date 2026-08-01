@@ -53,6 +53,9 @@ linters:
     - gocritic     # opinionated diagnostics/style/performance checks
     - revive       # light, fast style/lint pass (replacement for golint)
     - nolintlint   # a //nolint must name a linter and carry an explanation
+    - perfsprint   # fmt.Errorf with no format verb must be errors.New — the two
+                   # forms had drifted apart inside single fail-closed branches,
+                   # so this keeps one refusal idiom rather than two
 
   settings:
     gosec:

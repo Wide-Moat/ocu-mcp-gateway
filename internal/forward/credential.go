@@ -5,6 +5,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -36,10 +37,10 @@ type FileServiceCredential struct {
 // the first forward.
 func NewFileServiceCredential(path, principal string) (*FileServiceCredential, error) {
 	if path == "" {
-		return nil, fmt.Errorf("forward: NewFileServiceCredential requires a credential file path (fail-closed, NFR-SEC-26)")
+		return nil, errors.New("forward: NewFileServiceCredential requires a credential file path (fail-closed, NFR-SEC-26)")
 	}
 	if principal == "" {
-		return nil, fmt.Errorf("forward: NewFileServiceCredential requires a service principal name (the forward asserts a named principal)")
+		return nil, errors.New("forward: NewFileServiceCredential requires a service principal name (the forward asserts a named principal)")
 	}
 	c := &FileServiceCredential{path: path, principal: principal}
 	if _, err := c.read(); err != nil {
