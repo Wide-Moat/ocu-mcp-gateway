@@ -221,6 +221,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// (4c) Tool-name allowlist — deny-by-default at the ADMISSION boundary, before
+	// any Control provisioning. Profile validation only checks that params.name is
+	// a non-empty string; it does not check the name against the advertised set.
+	// Without this gate, an unadvertised name (a made-up "evil_tool", a delisted
+	// "sub_agent", any real-but-unserved tool) reached forward.Forward(), which
+	// runs Control's CREATE round-trip UNCONDITIONALLY before it ever inspects the
+	// tool-call's argv — so Control materialized a REAL session for a call the
+	// gateway cannot even execute. The eventual "unimplemented tool" -32602 the
+	// caller sees does not undo that side effect. Refusing here means the
+	// forwarder — and therefore Control — is never reached for a name the gateway
+	// does not serve; the response is the SAME well-formed -32602 contract the
+	// create-only path already used, so a caller cannot distinguish "denied before
+	// provisioning" from "denied after" by the response shape, only by the
+	// (unobservable to the caller, but security-relevant) fact that no session was
+	// created.
+	if name := toolNameFrom(raw); !allowedToolNames[name] {
+		writeRPCErrorWithID(w, idFrom(raw), http.StatusOK, rpcInvalidParams, "unimplemented tool")
+		return
+	}
+
 	req := forward.SessionRequest{
 		Principal: caller,
 		ToolCall:  toolCallFrom(raw),
@@ -448,6 +468,19 @@ func isNotification(raw []byte) bool {
 	_ = json.Unmarshal(raw, &msg)
 	idAbsent := len(msg.ID) == 0 || string(msg.ID) == "null"
 	return idAbsent || strings.HasPrefix(msg.Method, "notifications/")
+}
+
+// toolNameFrom reads params.name from the validated raw body. The body has
+// already passed profile validation (a non-empty string), so this is a
+// structural read of a known-good shape.
+func toolNameFrom(raw []byte) string {
+	var msg struct {
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	_ = json.Unmarshal(raw, &msg)
+	return msg.Params.Name
 }
 
 // toolCallFrom extracts the forwarded ToolCall from the validated raw body. The
