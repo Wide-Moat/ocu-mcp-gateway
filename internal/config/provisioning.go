@@ -135,7 +135,7 @@ type mountIntentEntry struct {
 // validation source, like every other policy field.
 func mountsFromWire(wire provisioningWire) ([]forward.MountIntent, error) {
 	if wire.MountIntent != nil && len(wire.MountIntents) > 0 {
-		return nil, fmt.Errorf("mount_intent and mount_intents are mutually exclusive; use mount_intents")
+		return nil, errors.New("mount_intent and mount_intents are mutually exclusive; use mount_intents")
 	}
 	entries := wire.MountIntents
 	if wire.MountIntent != nil {
