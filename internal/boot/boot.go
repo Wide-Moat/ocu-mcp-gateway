@@ -115,7 +115,7 @@ func (s *Sequencer) Refresh(ctx context.Context) error {
 		return fmt.Errorf("boot: refresh failed, keeping the last-good key set: %w", err)
 	}
 	if ks == nil {
-		return fmt.Errorf("boot: refresh returned a nil key set, keeping the last-good set")
+		return errors.New("boot: refresh returned a nil key set, keeping the last-good set")
 	}
 	s.keys.Store(&ks)
 	return nil

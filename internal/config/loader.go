@@ -18,6 +18,7 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -77,7 +78,7 @@ type bootSetWire struct {
 // the daemon must not bind a listener against an absent or malformed key set).
 func (l *FileKeySetLoader) Load(_ context.Context) (auth.KeySet, error) {
 	if l.Deployment == "" {
-		return nil, fmt.Errorf("config: boot-set load requires a non-empty gateway deployment (the deployment guard cannot be disabled; fail-closed)")
+		return nil, errors.New("config: boot-set load requires a non-empty gateway deployment (the deployment guard cannot be disabled; fail-closed)")
 	}
 	raw, err := os.ReadFile(l.Path)
 	if err != nil {
