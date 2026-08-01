@@ -126,3 +126,34 @@ func TestViewImageNonJPEGFallsThroughToText(t *testing.T) {
 		t.Errorf("a non-JPEG sentinel payload must fall through to a single plain-text block, got %+v", shape.Content)
 	}
 }
+
+// (h4) a control-truncated stdout must NEVER ship as an image block, even when the cut
+// base64 still decodes: a cut landing on a 4-char boundary is valid base64, so without
+// the wire-flag guard a PARTIAL JPEG would be presented as a clean render. The
+// stdout_truncated flag is the capture-side fact; the sentinel path refuses on it and
+// the reply falls through to the text relay, whose truncation note tells the caller the
+// body is partial. A truncated success stays a success (isError:false).
+func TestViewImageSentinelRefusesTruncatedStdout(t *testing.T) {
+	reply := sentinelReply(t, "/mnt/user-data/outputs/big.jpg", jpegBytes())
+	reply.StdoutTruncated = true
+	blob, err := projectCallToolResult(reply,
+		[]string{"/usr/bin/python3", "-c", "<viewscript>"})
+	if err != nil {
+		t.Fatalf("projectCallToolResult: %v", err)
+	}
+	var shape imageResultShape
+	if uerr := json.Unmarshal(blob, &shape); uerr != nil {
+		t.Fatalf("result must be a CallToolResult, got %q (%v)", blob, uerr)
+	}
+	for _, b := range shape.Content {
+		if b.Type == "image_url" {
+			t.Fatalf("a truncated stdout must never project an image block, got %+v", shape.Content)
+		}
+	}
+	if shape.IsError {
+		t.Errorf("a truncated success is still a success (isError:false), got isError:true")
+	}
+	if len(shape.Content) != 1 || !strings.Contains(shape.Content[0].Text, "[output truncated at") {
+		t.Errorf("the text fallback must surface the truncation note, got %+v", shape.Content)
+	}
+}
