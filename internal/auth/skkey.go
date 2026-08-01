@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -219,7 +220,7 @@ type staticAuthenticator struct {
 // against. Use NewStaticAuthenticatorLive when the set is refreshed at runtime.
 func NewStaticAuthenticator(keys KeySet) (CallerAuthenticator, error) {
 	if keys == nil {
-		return nil, fmt.Errorf("auth: NewStaticAuthenticator requires a non-nil KeySet (fail-closed)")
+		return nil, errors.New("auth: NewStaticAuthenticator requires a non-nil KeySet (fail-closed)")
 	}
 	return &staticAuthenticator{provider: func() KeySet { return keys }}, nil
 }
@@ -233,7 +234,7 @@ func NewStaticAuthenticator(keys KeySet) (CallerAuthenticator, error) {
 // nil-deref or an admit-all.
 func NewStaticAuthenticatorLive(provider func() KeySet) (CallerAuthenticator, error) {
 	if provider == nil {
-		return nil, fmt.Errorf("auth: NewStaticAuthenticatorLive requires a non-nil provider (fail-closed)")
+		return nil, errors.New("auth: NewStaticAuthenticatorLive requires a non-nil provider (fail-closed)")
 	}
 	return &staticAuthenticator{provider: provider}, nil
 }

@@ -6,6 +6,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -28,7 +29,7 @@ import (
 // source — so an absent pids_limit maps to nil and is refused THERE, at boot.
 func LoadProvisioningPolicy(path string) (forward.ProvisioningPolicy, error) {
 	if path == "" {
-		return forward.ProvisioningPolicy{}, fmt.Errorf("config: provisioning policy path is empty (fail-closed)")
+		return forward.ProvisioningPolicy{}, errors.New("config: provisioning policy path is empty (fail-closed)")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -109,7 +110,7 @@ func profileFromWire(s string) (forward.WorkloadTrustProfile, error) {
 	case "internal_workforce":
 		return forward.WorkloadTrustProfileInternalWorkforce, nil
 	case "":
-		return forward.WorkloadTrustProfileUnspecified, fmt.Errorf("workload_trust_profile is missing (never defaulted; Unspecified is not admissible)")
+		return forward.WorkloadTrustProfileUnspecified, errors.New("workload_trust_profile is missing (never defaulted; Unspecified is not admissible)")
 	default:
 		return forward.WorkloadTrustProfileUnspecified, fmt.Errorf("workload_trust_profile %q is not in the closed vocabulary {trusted_operator, internal_workforce}", s)
 	}
@@ -134,7 +135,7 @@ type mountIntentEntry struct {
 // validation source, like every other policy field.
 func mountsFromWire(wire provisioningWire) ([]forward.MountIntent, error) {
 	if wire.MountIntent != nil && len(wire.MountIntents) > 0 {
-		return nil, fmt.Errorf("mount_intent and mount_intents are mutually exclusive; use mount_intents")
+		return nil, errors.New("mount_intent and mount_intents are mutually exclusive; use mount_intents")
 	}
 	entries := wire.MountIntents
 	if wire.MountIntent != nil {
