@@ -31,6 +31,40 @@ const serverInfoVersion = "1.0.0"
 //go:embed tools_list.json
 var toolsListJSON []byte
 
+// resolveScopeToolName is the D5 synthetic scope-resolution tool. It rides the
+// SAME tools/call pipeline (bearer auth, ceiling, audit) as an advertised tool,
+// but has deliberately NO tools_list.json entry: it is invoked directly by the D5
+// client's own logic, never chosen by a model from tools/list discovery. It has
+// no gateway exec projection (no argv) — the forward package answers it from
+// Control's create-hop session status, not a guest exec.
+const resolveScopeToolName = "resolve_scope"
+
+// allowedToolNames is the set of tools/call names permitted to reach the F5
+// forward: every name tools/list actually advertises, plus the synthetic
+// resolve_scope tool. Computed once from the embedded tools_list.json so this
+// list cannot drift from what the client is told exists.
+var allowedToolNames = func() map[string]bool {
+	var doc struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(toolsListJSON, &doc); err != nil {
+		// tools_list.json is a build-time embedded, repo-committed artifact; a
+		// parse failure here is a broken build, not a runtime condition to
+		// tolerate. Fail loudly at init rather than silently allowing nothing
+		// (which would deny every tool call) or everything (which would defeat
+		// the allowlist).
+		panic("ingress: embedded tools_list.json is not valid JSON: " + err.Error())
+	}
+	set := make(map[string]bool, len(doc.Tools)+1)
+	for _, t := range doc.Tools {
+		set[t.Name] = true
+	}
+	set[resolveScopeToolName] = true
+	return set
+}()
+
 // jsonRPCID is a raw JSON-RPC id echoed back verbatim (it may be a string, a
 // number, or null per the JSON-RPC spec, so it is carried as RawMessage).
 type jsonRPCID = json.RawMessage
