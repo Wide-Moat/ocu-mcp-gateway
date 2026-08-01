@@ -65,18 +65,41 @@ def job_publishes(job):
         run = str(step.get("run") or "")
         with_ = step.get("with") or {}
         if any(a in uses for a in PUBLISH_ACTIONS):
+            action = uses.split("@")[0]
+            tags = str(with_.get("tags") or "")
+            outputs = str(with_.get("outputs") or "")
+
+            # `outputs: type=image,...,push=true` pushes just as surely as
+            # `push: true` does, and reading only the latter left a hole wide
+            # enough to drive a release through: a step carrying BOTH a
+            # consumer-reachable `tags:` and push=true inside `outputs:` was
+            # reported clean. The distinction that matters is not which key
+            # spells the push, it is whether the push mints a reference a
+            # consumer can resolve. push-by-digest with no tags does not --
+            # the digest is unguessable until something publishes it, which is
+            # what the promote-after-signing shape relies on.
+            if "push=true" in outputs.replace(" ", ""):
+                by_digest = "push-by-digest=true" in outputs.replace(" ", "")
+                if by_digest and not tags:
+                    continue
+                if STAGING_MARKER in tags:
+                    continue
+                if by_digest:
+                    return (f"step `{action}` pushes by digest but ALSO carries tags "
+                            f"({tags.strip()[:60]}), so a consumer-reachable ref exists before signing")
+                return f"step `{action}` pushes via outputs ({outputs.strip()[:60]})"
+
             push = with_.get("push")
             # `push:` absent defaults to false for build-push-action; an
             # expression is unresolvable here and is reported rather than
             # assumed either way.
             if push is None or push is False or str(push).lower() == "false":
                 continue
-            tags = str(with_.get("tags") or "")
             if STAGING_MARKER in tags:
                 continue
             if "${{" in str(push):
-                return f"step `{uses.split('@')[0]}` push is the expression {push!r}, which may be true"
-            return f"step `{uses.split('@')[0]}` with push: {push}"
+                return f"step `{action}` push is the expression {push!r}, which may be true"
+            return f"step `{action}` with push: {push}"
         for marker in PUBLISH_SHELL:
             if marker in run:
                 line = next((l.strip() for l in run.splitlines() if marker in l), marker)
@@ -240,6 +263,27 @@ SELF_TESTS = [
     ("pull-request build that does not push", 0, {
         "w.yml": {"on": {"pull_request": None}, "jobs": {
             "image": {"steps": [{"uses": "docker/build-push-action@v7", "with": {"push": False}}]}}}}),
+    # The `outputs:` spelling of a push. Reading only `with.push` reported the
+    # first of these clean, which is the hole these three close.
+    ("push=true inside outputs with consumer tags and no signer", 1, {
+        "w.yml": {"on": {"push": {"branches": ["main"]}}, "jobs": {
+            "image": {"steps": [{"uses": "docker/build-push-action@v7", "with": {
+                "tags": "ghcr.io/o/i:latest",
+                "outputs": "type=image,name=ghcr.io/o/i,push=true"}}]},
+            "sign": {"needs": "image", "steps": [{"run": "cosign sign --yes ghcr.io/o/i:latest"}]}}}}),
+    ("push-by-digest with no tags, tagged only after the signer", 0, {
+        "w.yml": {"on": {"push": {"branches": ["main"]}}, "jobs": {
+            "image": {"steps": [{"uses": "docker/build-push-action@v7", "with": {
+                "outputs": "type=image,name=ghcr.io/o/i,push-by-digest=true,name-canonical=true,push=true"}}]},
+            "sign": {"needs": "image", "steps": [{"run": "cosign sign --yes ghcr.io/o/i@$DIGEST"}]},
+            "promote": {"needs": ["image", "sign"],
+                        "steps": [{"run": "docker buildx imagetools create --tag ghcr.io/o/i:main ghcr.io/o/i@$DIGEST"}]}}}}),
+    ("push-by-digest that also carries tags is still a violation", 1, {
+        "w.yml": {"on": {"push": {"branches": ["main"]}}, "jobs": {
+            "image": {"steps": [{"uses": "docker/build-push-action@v7", "with": {
+                "tags": "ghcr.io/o/i:main",
+                "outputs": "type=image,name=ghcr.io/o/i,push-by-digest=true,push=true"}}]},
+            "sign": {"needs": "image", "steps": [{"run": "cosign sign --yes ghcr.io/o/i@$DIGEST"}]}}}}),
 ]
 
 
