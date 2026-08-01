@@ -274,3 +274,47 @@ func jsonStr(s string) string {
 	b = append(b, '"')
 	return string(b)
 }
+
+// TestStrReplaceScriptMissingPathAndFileUnchanged pins two edge invariants the
+// three-error-semantics coverage does not reach: (1) a str_replace against a path
+// that does not exist takes the generic exception branch (open() raises) and exits
+// non-zero with an "Error:" line rather than crashing or silently succeeding, and
+// without creating the file as a side effect; and (2) the "on any error it leaves
+// the file unchanged" guarantee holds for the NOT-FOUND case, not only for the
+// ambiguous one. A partial or clobbering write on a failed replace would be silent
+// data loss — the caller is told the edit was refused while the bytes moved anyway.
+func TestStrReplaceScriptMissingPathAndFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("missing path errors non-zero and creates nothing", func(t *testing.T) {
+		absent := filepath.Join(dir, "does-not-exist.txt")
+		payload := `{"path":` + jsonStr(absent) + `,"old_str":"a","new_str":"b"}`
+		out, code := runScript(t, projection.StrReplaceScript, payload)
+		if code == 0 {
+			t.Fatalf("str_replace on a missing path must fail non-zero, got 0 (out=%q)", out)
+		}
+		if !strings.Contains(out, "Error:") {
+			t.Errorf("a missing-path failure must print an Error: line, got %q", out)
+		}
+		if _, err := os.Stat(absent); !os.IsNotExist(err) {
+			t.Errorf("a failed str_replace must not create the target file")
+		}
+	})
+
+	t.Run("not-found leaves the file byte-unchanged", func(t *testing.T) {
+		target := filepath.Join(dir, "keep.txt")
+		const original = "the original bytes stay put"
+		if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		payload := `{"path":` + jsonStr(target) + `,"old_str":"absent","new_str":"x"}`
+		out, code := runScript(t, projection.StrReplaceScript, payload)
+		if code == 0 {
+			t.Fatalf("not-found must fail non-zero, got 0 (out=%q)", out)
+		}
+		got, _ := os.ReadFile(target)
+		if string(got) != original {
+			t.Errorf("a not-found str_replace must leave the file unchanged; got %q, want %q", got, original)
+		}
+	})
+}
