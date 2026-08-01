@@ -226,10 +226,10 @@ type ControlForwarder struct {
 // (NFR-SEC-26), never go anonymous.
 func NewControlForwarderWithDial(identity ServiceIdentity, dial DialConfig, cred ServiceCredential, provisioning ProvisioningPolicy) (*ControlForwarder, error) {
 	if identity.Name == "" {
-		return nil, fmt.Errorf("forward: NewControlForwarderWithDial requires a non-empty service identity (fail-closed)")
+		return nil, errors.New("forward: NewControlForwarderWithDial requires a non-empty service identity (fail-closed)")
 	}
 	if cred == nil {
-		return nil, fmt.Errorf("forward: NewControlForwarderWithDial requires a ServiceCredential (fail-closed, NFR-SEC-26)")
+		return nil, errors.New("forward: NewControlForwarderWithDial requires a ServiceCredential (fail-closed, NFR-SEC-26)")
 	}
 	// The provisioning policy must be admissible up front: a create built from an
 	// Unspecified/unknown profile, an ill-formed mount scope, or an unset pids cap
