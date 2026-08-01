@@ -114,3 +114,51 @@ func TestToolDescriptionsAreBounded(t *testing.T) {
 		}
 	}
 }
+
+// A description that names a place the user cannot reach is worse than a vague one:
+// the model repeats it verbatim and sends the user hunting. This deployment has no
+// browsable file surface in the chat -- a download link the model emits is the only
+// thing a user can click -- yet two descriptions promised a "Files panel", and the
+// model duly told a user to find the file there. Nothing failed; the answer was simply
+// false. This pins the absence, so the phrase cannot return the way it arrived.
+func TestDescriptionsPromiseNoUnreachableSurface(t *testing.T) {
+	// Each phrase names a UI affordance this deployment does not serve. Matching is
+	// case-insensitive because the model reads meaning, not casing.
+	unreachable := []string{
+		"files panel",
+		"file panel",
+		"files sidebar",
+		"downloads panel",
+		"file browser",
+	}
+
+	descs := toolDescriptions(t)
+	if len(descs) == 0 {
+		t.Fatal("tools/list advertised no tool; this check verified nothing")
+	}
+
+	for name, desc := range descs {
+		low := strings.ToLower(desc)
+		for _, phrase := range unreachable {
+			if strings.Contains(low, phrase) {
+				t.Errorf("tool %q promises %q, a surface the chat does not serve; "+
+					"the model repeats it and the user is sent somewhere that does not "+
+					"exist. Describe the download link instead.", name, phrase)
+			}
+		}
+	}
+
+	// Absence is only meaningful if the matcher fires. Prove it on a string built to
+	// be caught, so an empty result above cannot be a matcher that never matches.
+	probe := strings.ToLower("files appear in the user's Files panel")
+	hit := false
+	for _, phrase := range unreachable {
+		if strings.Contains(probe, phrase) {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatal("the matcher did not fire on a known-positive; the clean result above " +
+			"says nothing about the descriptions")
+	}
+}
