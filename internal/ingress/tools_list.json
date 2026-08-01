@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "bash_tool",
-      "description": "Run a bash command in the container. Write to /home/assistant (the per-session writable workspace, wiped when the session ends) or /tmp (ephemeral scratch). Read user-shared files at /mnt/user-data/uploads (read-only). Save files the user should keep or download to /mnt/user-data/outputs, where they appear in the user's Files panel; list it to verify a deliverable.",
+      "description": "Run a bash command in the container. Write to /home/assistant (the per-session writable workspace, wiped when the session ends) or /tmp (ephemeral scratch). Read user-shared files at /mnt/user-data/uploads (read-only). Save files the user should keep or download to /mnt/user-data/outputs; list it to verify a deliverable. Saving is not delivery - the user receives a file only from a download link you emit.",
       "inputSchema": {
         "properties": {
           "command": {
@@ -56,7 +56,7 @@
     },
     {
       "name": "create_file",
-      "description": "Create a file with the given contents. Use /home/assistant for per-session working files (wiped at session end) or /tmp for ephemeral scratch. Write to /mnt/user-data/outputs to save a file the user should keep or download — files there appear in the user's Files panel (/mnt/user-data/uploads is the user's read-only upload area). The rootfs outside these paths is read-only.",
+      "description": "Create a file with the given contents. Use /home/assistant for per-session working files (wiped at session end) or /tmp for ephemeral scratch. Write to /mnt/user-data/outputs to save a file the user should keep or download; the user receives it only from a download link you emit, not by browsing (/mnt/user-data/uploads is the user's read-only upload area). The rootfs outside these paths is read-only.",
       "inputSchema": {
         "properties": {
           "description": {
