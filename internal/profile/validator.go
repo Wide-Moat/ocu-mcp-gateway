@@ -66,7 +66,7 @@ type Validator struct {
 // tighter bound sets a positive value).
 func NewValidator(base BaseValidator, limits Limits) (*Validator, error) {
 	if base == nil {
-		return nil, fmt.Errorf("profile: NewValidator requires a non-nil BaseValidator (the base pass is load-bearing; fail-closed)")
+		return nil, errors.New("profile: NewValidator requires a non-nil BaseValidator (the base pass is load-bearing; fail-closed)")
 	}
 	if limits == (Limits{}) {
 		limits = DefaultLimits()
