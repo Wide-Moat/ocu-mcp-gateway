@@ -10,8 +10,12 @@ import _ "embed"
 // reading it from disk at boot (a disk read would be a fail-open seam: a missing
 // or truncated file must never silently relax validation). The source is the
 // canon wire contract vendored byte-identical at contracts/mcp/2025-06-18/ — see
-// VENDORED.md for its provenance (canon SHA 62f5eeb, blob OID fbada4ed). The
-// relative path is resolved from THIS package directory by go:embed.
+// VENDORED.md for its provenance (canon SHA 099d3d7, blob OID 23b28bd, the
+// ADR-0027 two-shelf x-ocu-authz re-pin). vendored_drift_test.go pins that this
+// copy stays byte-identical to contracts/mcp/2025-06-18/ — scripts/vendored_check.py
+// only tracks the contracts/ path against canon, not this copy against contracts/,
+// so a canon re-pin can otherwise leave this embed silently stale. The relative
+// path is resolved from THIS package directory by go:embed.
 //
 //go:embed ocu-constraints.schema.json
 var constraintProfileJSON []byte

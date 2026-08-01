@@ -104,6 +104,21 @@ SHA-256 of the vendored copies:
 > leaves that path UNSET and documented, never invents or silently drops it. See
 > issue #3 for the architect's assessment.
 
+> **A second, RUNTIME copy exists**: `internal/profile/ocu-constraints.schema.json`
+> is a go:embed'd copy of the SAME artifact, embedded at build time so the
+> validator carries its contract in the binary rather than reading it from disk
+> at boot (`internal/profile/embed.go`). `scripts/vendored_check.py` checks ONLY
+> the `contracts/` path against canon — it has no entry for the embedded copy, so
+> a canon re-pin that updates `contracts/mcp/2025-06-18/ocu-constraints.schema.json`
+> (as this row's history shows — see the re-pin note above, `fbada4ed`→`23b28bd`
+> for the ADR-0027 two-shelf `x-ocu-authz` split) can silently leave the embedded
+> copy on the OLD pin, so the RUNNING VALIDATOR enforces a stale contract while
+> the vendored artifact on disk is current. `internal/profile/vendored_drift_test.go`
+> closes this gap: it asserts `profile.ProfileBytes()` (the embedded bytes) stays
+> byte-identical to `contracts/mcp/2025-06-18/ocu-constraints.schema.json` on disk.
+> Found drifted at `fbada4ed` (pre-ADR-0027) while `contracts/` had already
+> re-vendored to `23b28bd`; re-vendored to match, now both copies read `23b28bd`.
+
 Verify a vendored copy is still byte-identical to its canon source:
 
 ```sh

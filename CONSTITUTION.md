@@ -73,6 +73,21 @@ the SAME change that gives it a working projection, never before. `sub_agent` is
 PERMANENT non-goal — the OCU fleet does not run the agent loop (MANIFESTO v1) — so it
 is never advertised. The advertised set is a frozen expectation a drift-guard pins.
 
+A `tools/call` whose **name is not in the advertised set** is refused BEFORE the
+forward, not merely shaped into an honest error after. The base/OCU profile only
+requires `params.name` to be a non-empty string; it does not check the name
+against what `tools/list` actually advertises. Without this admission gate, an
+unadvertised name (a made-up name, the delisted `sub_agent`, any real-but-unserved
+tool) still reached `forward.Forward()`, which runs Control's CREATE round-trip
+UNCONDITIONALLY before it ever inspects the tool-call's argv — so an
+authenticated caller sending any name caused Control to materialize a REAL
+session for a call the gateway cannot execute. The eventual `-32602`
+"unimplemented tool" response the caller sees does not undo that side effect.
+The allowlist is computed from the embedded `tools_list.json` (so it cannot drift
+from what the client is told exists) plus the synthetic `resolve_scope` tool
+(D5), which rides the same pipeline but is deliberately absent from
+`tools_list.json` (it is invoked directly by the D5 client, never discovered).
+
 A JSON-RPC **notification** — a message with no `id`, or a `notifications/*`
 method — is fire-and-forget and is acknowledged `202 Accepted` with an EMPTY body
 BEFORE the handshake/forward routing: it is never answered with a result or a
@@ -106,7 +121,13 @@ is dropped before the forward, it too cannot ride the F5 leg.
   tool-set honesty: `internal/ingress/tools_list_drift_test.go`
   (`TestToolsListIsExpectedSetOnly` — the advertised set equals the frozen
   expectation exactly, RED on drift; `TestSubAgentIsNeverAdvertised` — the
-  agent-loop non-goal is never advertised). The
+  agent-loop non-goal is never advertised). The tool-NAME admission gate:
+  `internal/ingress/tool_name_allowlist_test.go`
+  (`TestUnadvertisedToolNameNotForwarded` — an unadvertised name (a made-up name,
+  the delisted `sub_agent`, a real-but-unserved PoC tool) never reaches the
+  recording forwarder, i.e. no Control session is materialized; removing the gate
+  reds it; `TestAdvertisedToolNamesStillForward` — every served tool plus the
+  synthetic `resolve_scope` still forwards). The
   notification 202 rule: `internal/ingress/streamable_test.go`
   (`TestNotificationInitializedIsAccepted202` — the notification the SDK sends
   post-initialize is 202 with an empty body and never forwarded; answering it
@@ -688,6 +709,14 @@ reason, never an unbounded park.
   constraint profile (the bounded `$def`s, the numeric caps, the revision). The
   vendored copy is byte-identical to canon (its git blob OID is recorded in
   `VENDORED.md`).
+- The validator does NOT read that `contracts/` copy at runtime — it validates
+  against a SEPARATE go:embed'd copy at `internal/profile/ocu-constraints.schema.json`
+  (`internal/profile/embed.go`). `scripts/vendored_check.py` only checks the
+  `contracts/` copy against canon; it has no entry for the embedded one. A canon
+  re-pin that updates `contracts/` can silently leave the embedded copy stale (this
+  happened once — see `VENDORED.md`'s re-pin note). `internal/profile/vendored_drift_test.go`
+  is the invariant: the embedded bytes must stay byte-identical to the `contracts/`
+  copy. Re-vendor BOTH copies together on any re-pin, never just one.
 - All committed content is English only. State facts in this project's own words;
   the specs, ADRs, and the frozen contract are the only citable sources for
   behaviour.

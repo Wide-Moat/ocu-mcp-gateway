@@ -88,12 +88,14 @@ func resultText(t *testing.T, shape callToolResultShape) string {
 	return shape.Content[0].Text
 }
 
-// The @L4 @bash @error / @happy / @contrast scenarios pin the exit→content SHAPING
-// contract (Fable ruling): the gateway synthesizes the PoC literal "[Exit code: N]"
-// ONLY when a non-zero exit wrote NOTHING to either stream (raw byte length on both,
-// mirroring the PoC Python truthiness), relays real output otherwise, and never
-// synthesizes on success. It relays exit-code facts and does NOT interpret per-command
-// exit semantics (the grep-no-match contrast). Each asserts the EXACT result text.
+// The @L4 @bash @error / @happy scenarios pin the exit→content SHAPING contract
+// (Fable ruling): the gateway synthesizes the PoC literal "[Exit code: N]" ONLY when a
+// non-zero exit wrote NOTHING to either stream (raw byte length on both, mirroring the
+// PoC Python truthiness), relays real output otherwise, and never synthesizes on
+// success. Since D8 the gateway ALSO applies the PoC COMMAND_SEMANTICS table when the
+// benign-exit command IS the argv's first command (bare grep/rg/find/diff/test/[
+// exit-1 → informational, isError:false, test F2); a compound command leading with
+// another program is untouched (test D). Each test asserts the EXACT result text.
 
 // A — non-zero exit, no output → the synthesized marker. THE keystone: reds against the
 // NEUTER that removed the shaping.
@@ -131,17 +133,39 @@ func TestL4BashExitWithStdoutOnlyRelaysStdout(t *testing.T) {
 	}
 }
 
-// D — @contrast: grep no-match (exit 1, no output) is a tool error carrying the marker.
-// The gateway does NOT rewrite it to a PoC-style "No matches found": it relays the exit
-// fact. This pins the deliberate PoC-vs-fleet divergence AND exercises synthesis on a
-// real command.
+// D — a COMPOUND command whose grep exits 1: the semantics table does NOT fire, because
+// the argv's FIRST command is printf, not grep (firstCommandFromArgv reads the command
+// the gateway itself built). The exit fact is relayed as the marker. Since D8 this test
+// pins the table's SCOPE (first-command-only), no longer a no-rewriting-at-all claim —
+// the bare-grep rewriting half is test F2 below; the deploy-side feature scenario is
+// being re-worded to match (audit finding A1).
 func TestL4BashGrepNoMatchIsExitCodeError(t *testing.T) {
 	shape, _ := forwardToolL4(t, "bash_tool", `{"command":"printf hay > /tmp/f && grep needle /tmp/f"}`)
 	if !shape.IsError {
-		t.Errorf("grep no-match (exit 1) must be isError:true under the fleet contract, got %+v", shape)
+		t.Errorf("compound grep no-match (exit 1) must stay isError:true (first command is printf), got %+v", shape)
 	}
 	if got := resultText(t, shape); got != "[Exit code: 1]" {
-		t.Errorf("grep no-match must be exactly \"[Exit code: 1]\" (no per-command rewriting), got %q", got)
+		t.Errorf("compound grep no-match must be exactly \"[Exit code: 1]\", got %q", got)
+	}
+}
+
+// F2 — the D8 keystone at COMPOSITION level: a BARE grep (grep IS the first command of
+// the gateway-built argv) exiting 1 with empty streams rides the REAL create+exec hops
+// and is rewritten by the COMMAND_SEMANTICS table — isError:false and the table
+// message, never the "[Exit code: 1]" marker. The unit pins live in
+// command_semantics_test.go (direct projectCallToolResult calls); this is the one case
+// that reds through the full forward if the D8 table is neutered.
+func TestL4BashBareGrepNoMatchFiresSemantics(t *testing.T) {
+	hay := filepath.Join(t.TempDir(), "hay.txt")
+	if err := os.WriteFile(hay, []byte("hay\n"), 0o600); err != nil {
+		t.Fatalf("seed the haystack file: %v", err)
+	}
+	shape, _ := forwardToolL4(t, "bash_tool", `{"command":"grep needle `+hay+`"}`)
+	if shape.IsError {
+		t.Errorf("bare grep no-match (exit 1) must fire the semantics (isError:false), got %+v", shape.Content)
+	}
+	if got := resultText(t, shape); got != "No matches found" {
+		t.Errorf("bare grep no-match must carry exactly %q, got %q", "No matches found", got)
 	}
 }
 
