@@ -102,6 +102,15 @@
         "title": "viewArguments",
         "type": "object"
       }
+    },
+    {
+      "name": "resolve_scope",
+      "description": "Resolve this chat's storage scope. Returns {\"effective_scope\":\"<scope>\"} for the session this chat already owns. An empty scope means the deployment derives no per-chat scope; treat that as the base scope rather than an error. Call it when a surface needs to name the chat's own storage and nothing else.",
+      "inputSchema": {
+        "properties": {},
+        "title": "resolve_scopeArguments",
+        "type": "object"
+      }
     }
   ]
 }
