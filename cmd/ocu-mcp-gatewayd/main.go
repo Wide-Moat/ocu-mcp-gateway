@@ -70,6 +70,13 @@ type options struct {
 	deployment      string
 	refreshInterval time.Duration
 
+	// resolveOnlyKeyIDs confines the named credentials to the synthetic
+	// resolve_scope tool. It is a comma-separated list of key ids, and it is
+	// deployment policy rather than a key-record field so an operator can bind an
+	// embedding portal's credential to a scope lookup without re-minting it (see
+	// ingress.ResolveOnlyPolicy). Empty restricts nobody.
+	resolveOnlyKeyIDs string
+
 	// F5 guarded-construction knobs (§III): the gateway's own service credential,
 	// the deployment provisioning policy, and the mTLS-1.3 client material for the
 	// Control dial. The credential and the policy are ALWAYS required (the guarded
@@ -114,6 +121,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in over a network bus; not yet wired — a future follow-up, contract #150)")
 	fs.StringVar(&o.auditSink, "audit-sink", "", "durable OCSF audit file (append-only newline-delimited JSON, fsync-before-ack); the fleet-aligned F10 sink. Empty AND empty -audit-bus fails closed on every emit")
 	fs.IntVar(&o.serializeDepth, "serialize-max-depth", 64, "max queued tool-calls per session before refusal (NFR-IC-05 per-session serializer; DoS guard on the session key)")
+	fs.StringVar(&o.resolveOnlyKeyIDs, "resolve-only-key-ids", "", "comma-separated key ids confined to the resolve_scope tool (e.g. -resolve-only-key-ids=portal-a,portal-b); such a caller may learn a chat's storage scope and execute no tool. Empty restricts nobody")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -254,6 +262,12 @@ func serve(ctx context.Context, o options) error {
 	// (CLI/SDK) caller; browser origins are opted in via -allowed-origin.
 	origin := ingress.NewOriginPolicy(o.allowedOrigins)
 
+	// Build the resolve-only caller policy (-resolve-only-key-ids). A credential a
+	// deployment issues to an embedding portal exists to answer one question — the
+	// storage scope of a chat — so naming it here strips its tool execution while
+	// leaving every other caller untouched. Unset restricts nobody.
+	resolveOnly := ingress.NewResolveOnlyPolicy(o.resolveOnlyKeyIDs)
+
 	// Build the F10 OCSF audit sink and emitter. A configured -audit-sink is the
 	// fleet-aligned durable FILE sink: it appends each OCSF envelope as one
 	// newline-delimited JSON line and fsyncs BEFORE the emit returns, so a forward
@@ -287,7 +301,7 @@ func serve(ctx context.Context, o options) error {
 	serializer := serialize.NewSerializer(o.serializeDepth, nil)
 
 	// Compose the ingress handler.
-	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling, origin, emitter, serializer)
+	handler, err := ingress.NewHandler(authn, validator, forwarder, ceiling, origin, resolveOnly, emitter, serializer)
 	if err != nil {
 		return fmt.Errorf("serve: build handler: %w", err)
 	}

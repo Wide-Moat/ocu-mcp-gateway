@@ -71,6 +71,78 @@ func TestShippedForwarderWiringUsesGuardedConstructor(t *testing.T) {
 	}
 }
 
+// TestParseOptionsResolveOnlyKeyIDs pins the operator-facing SYNTAX of the
+// resolve-only knob: one flag carrying a comma-separated list of key ids. The
+// deployment writes this list, so the flag name and its separator are a contract
+// with every compose file and Helm values file that sets it, not an internal
+// detail. Unset means no caller is confined.
+func TestParseOptionsResolveOnlyKeyIDs(t *testing.T) {
+	t.Parallel()
+
+	o, err := parseOptions([]string{"-resolve-only-key-ids=portal-a,portal-b"})
+	if err != nil {
+		t.Fatalf("parse -resolve-only-key-ids: %v", err)
+	}
+	if o.resolveOnlyKeyIDs != "portal-a,portal-b" {
+		t.Errorf("the flag must carry the comma-separated list verbatim, got %q", o.resolveOnlyKeyIDs)
+	}
+
+	unset, err := parseOptions(nil)
+	if err != nil {
+		t.Fatalf("parse with no flags: %v", err)
+	}
+	if unset.resolveOnlyKeyIDs != "" {
+		t.Errorf("the knob must default to empty (confine nobody), got %q", unset.resolveOnlyKeyIDs)
+	}
+}
+
+// TestShippedHandlerWiringUsesTheResolveOnlyFlag pins the knob to the COMPOSITION
+// ROOT the same way the forwarder prong above does: the resolve-only policy the
+// shipped handler receives must be built from the parsed flag. A hard-coded
+// argument would compile, boot, and silently confine nobody however the operator
+// configured the deployment — the "knob exists, production ignores it" failure
+// that no behavioral ingress test can see.
+func TestShippedHandlerWiringUsesTheResolveOnlyFlag(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	path := filepath.Join(thisDir(t), "main.go")
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+
+	wired := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "NewResolveOnlyPolicy" {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "ingress" {
+			return true
+		}
+		if len(call.Args) != 1 {
+			t.Errorf("main.go:%d builds the resolve-only policy with %d arguments, want the parsed flag", fset.Position(call.Pos()).Line, len(call.Args))
+			return true
+		}
+		arg, ok := call.Args[0].(*ast.SelectorExpr)
+		if !ok || arg.Sel.Name != "resolveOnlyKeyIDs" {
+			t.Errorf("main.go:%d builds the resolve-only policy from something other than the parsed -resolve-only-key-ids flag; the deployment's list would never reach the handler", fset.Position(call.Pos()).Line)
+			return true
+		}
+		wired++
+		return true
+	})
+	if wired == 0 {
+		t.Error("main.go never builds ingress.NewResolveOnlyPolicy from o.resolveOnlyKeyIDs; the shipped handler would confine nobody regardless of deployment config")
+	}
+}
+
 // The behavioral prong: serve() — the SHIPPED boot path — must refuse a
 // configuration that cannot walk the guarded forwarder construction, and it must
 // refuse it fail-closed at BOOT (before any listener binds), naming the missing

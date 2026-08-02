@@ -71,7 +71,7 @@ func refusalHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceiling,
 	}
 	h, err := NewHandler(
 		tenantFromBearerAuth{},
-		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), em, serialize.NewSerializer(64, nil),
+		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), NewResolveOnlyPolicy(""), em, serialize.NewSerializer(64, nil),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -190,7 +190,7 @@ func TestPreAuthRefusalsDoNotEmit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("emitter: %v", err)
 	}
-	h401, err := NewHandler(rejectAllAuth{}, newValidator(t), &recordingForwarder{}, quota.NewCeiling(64), NewOriginPolicy(nil), em, serialize.NewSerializer(64, nil))
+	h401, err := NewHandler(rejectAllAuth{}, newValidator(t), &recordingForwarder{}, quota.NewCeiling(64), NewOriginPolicy(nil), NewResolveOnlyPolicy(""), em, serialize.NewSerializer(64, nil))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
