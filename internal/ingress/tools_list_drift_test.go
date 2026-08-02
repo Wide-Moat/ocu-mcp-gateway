@@ -13,23 +13,35 @@ import (
 )
 
 // The gateway advertises exactly the tools it can actually serve. Advertising a tool
-// it cannot serve (no exec projection) returns a create-only -32602 and the model
-// silently falls back — a worse experience than a tool that executes. A tool is
-// advertised in the SAME change that gives it a working gateway exec projection. The
-// serving set is bash_tool plus the file tools (create_file, view, str_replace),
-// which project to a guest interpreter script (the Q2 file-tool projections).
+// it cannot serve returns a create-only -32602 and the model silently falls back — a
+// worse experience than a tool that executes. A tool is advertised in the SAME change
+// that gives it a working projection. Most of the serving set projects to a guest
+// interpreter script: bash_tool plus the file tools (create_file, view, str_replace),
+// the Q2 file-tool projections.
+//
+// resolve_scope is the one SYNTHETIC member: it has no guest exec and no argv by
+// design, and projects through projectScopeResult instead (forward/http.go). The rule
+// is unchanged — it is advertised because its projection exists — and the failure the
+// rule guards against does not arise: the gateway serves the call itself rather than
+// answering create-only. It went unadvertised for its whole life, which is the reason
+// the pane could not name its own chat's storage; a capability nothing surfaces is a
+// capability nobody has.
+//
 // sub_agent is a permanent non-goal (the OCU fleet does not run the agent loop —
 // MANIFESTO v1), so it is never advertised. This drift-guard pins the advertised set.
 
 // expectedAdvertisedTools is the frozen set tools/list must advertise: the tools with
 // a working gateway exec projection. A tool is added here in the SAME change that
 // gives it a projection, never before, and sub_agent is never added (non-goal).
-var expectedAdvertisedTools = []string{"bash_tool", "create_file", "str_replace", "view"}
+var expectedAdvertisedTools = []string{
+	"bash_tool", "create_file", "str_replace", "view",
+	// Synthetic: projects via projectScopeResult, not a guest script.
+	"resolve_scope",
+}
 
 // TestToolsListIsExpectedSetOnly is the drift-guard keystone: the advertised
-// tools/list set MUST equal expectedAdvertisedTools exactly. Re-adding str_replace/
-// create_file/view before their projection lands, or leaving sub_agent advertised,
-// reds this.
+// tools/list set MUST equal expectedAdvertisedTools exactly. Advertising anything
+// before its projection lands, or leaving sub_agent advertised, reds this.
 //
 // Red-probe: adding any other tool name to the embedded tools_list.json (or to the
 // expected set without a matching entry) reds the set-equality assertion.
