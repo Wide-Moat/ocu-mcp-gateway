@@ -259,6 +259,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (post-parse, issue #38) and its message is a fixed reason class carrying no
 	// caller-derived value (invariant #5).
 	if h.resolveOnly.Restricted(caller.KeyID) && name != resolveScopeToolName {
+		// A confined credential reaching for a tool it may not call is a
+		// terminated request with a validated identity, so it is recorded (§XI)
+		// durable-first before the 403. The deliberate omission in that rule is
+		// the PRE-auth boundary, where no caller is resolved yet; this refusal
+		// sits after authentication and names the actor, so it belongs with the
+		// ceiling and forward refusals rather than with the transport-layer ones.
+		// A credential probing for authority it does not have is exactly the
+		// event an operator needs in the trail.
+		if !h.recordRefusal(w, r, idFrom(raw), caller.KeyID, boundedResource(name)) {
+			return
+		}
 		writeRPCErrorWithID(w, idFrom(raw), http.StatusForbidden, rpcInvalidRequest, "tool not permitted for this caller")
 		return
 	}

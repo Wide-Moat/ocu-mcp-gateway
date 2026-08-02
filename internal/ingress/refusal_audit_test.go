@@ -235,3 +235,29 @@ func TestSuccessStillRecorded(t *testing.T) {
 		t.Errorf("the success event must map to OCSF Success, got %v", events[0]["status"])
 	}
 }
+
+// A confined credential reaching for a tool it may not call is a terminated
+// request WITH a validated identity, so §XI puts it with the ceiling and forward
+// refusals, not with the pre-auth omissions: the caller is already resolved when
+// the guard fires and the event names it. A credential probing for authority it
+// does not have is precisely what an operator needs in the trail.
+// Red-probe: drop the recordRefusal from the confinement branch -> RED here while
+// TestPreAuthRefusalsStaySilent (the pinned exclusion) stays green.
+func TestConfinementRefusalIsRecorded(t *testing.T) {
+	sink := &recordingSink{}
+	fwd := &recordingForwarder{}
+	h := refusalHandler(t, fwd, nil, sink)
+	h.resolveOnly = NewResolveOnlyPolicy("t-actor")
+
+	rec := post(h, pinnedProtocolVersion, "t-actor", validToolCall)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a confined caller's non-resolve tool call must be 403, got %d", rec.Code)
+	}
+	if fwd.got != nil {
+		t.Fatal("the refusal must terminate before the forward")
+	}
+	fails := failureEvents(t, sink.events())
+	if len(fails) != 1 {
+		t.Fatalf("a confinement refusal must record exactly one OutcomeFailure event, got %d", len(fails))
+	}
+}
