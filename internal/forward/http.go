@@ -555,7 +555,7 @@ type callToolResult struct {
 // block (Type "image_url", ImageURL set). ImageURL is a pointer so a text block omits the
 // field entirely (omitempty) rather than emitting an empty object.
 type contentBlock struct {
-	Type     string       `json:"type"`
+	Type string `json:"type"`
 	// No omitempty: a command that exits silently yields Text == "", and dropping
 	// the key emits {"type":"text"} — which is not a valid MCP TextContent. The
 	// caller then fails the whole CallToolResult on a missing required field and
