@@ -46,7 +46,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 	}
 	h, err := NewHandler(
 		acceptAuth{caller: auth.Caller{KeyID: "k1", Tenant: "t1", Deployment: "a1"}},
-		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), newEmitter(t), newSerializer(t),
+		newValidator(t), fwd, ceiling, NewOriginPolicy(nil), NewResolveOnlyPolicy(""), newEmitter(t), newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
@@ -192,7 +192,7 @@ func TestF10_AuditWriteFailureIsRefusal(t *testing.T) {
 		acceptAuth{caller: auth.Caller{KeyID: "k1"}},
 		newValidator(t),
 		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}}, // forward SUCCEEDS
-		quota.NewCeiling(64), NewOriginPolicy(nil), em, newSerializer(t),
+		quota.NewCeiling(64), NewOriginPolicy(nil), NewResolveOnlyPolicy(""), em, newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -213,7 +213,7 @@ func TestF10_AuditActorIsHostAttested(t *testing.T) {
 		acceptAuth{caller: auth.Caller{KeyID: "resolved-key-9"}},
 		newValidator(t),
 		&recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}},
-		quota.NewCeiling(64), NewOriginPolicy(nil), em, newSerializer(t),
+		quota.NewCeiling(64), NewOriginPolicy(nil), NewResolveOnlyPolicy(""), em, newSerializer(t),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
@@ -261,7 +261,7 @@ func TestNewHandlerFailsClosedOnNilSeam(t *testing.T) {
 		{"nil serializer", a, v, fwd, c, em, nil},
 	}
 	for _, tc := range cases {
-		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl, NewOriginPolicy(nil), tc.em, tc.sz); err == nil {
+		if _, err := NewHandler(tc.authn, tc.val, tc.f, tc.cl, NewOriginPolicy(nil), NewResolveOnlyPolicy(""), tc.em, tc.sz); err == nil {
 			t.Errorf("%s: NewHandler must fail closed, got nil error", tc.name)
 		}
 	}

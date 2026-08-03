@@ -64,7 +64,7 @@ func handlerWithSerializer(t *testing.T, fwd forward.Forwarder, s *serialize.Ser
 	t.Helper()
 	h, err := NewHandler(
 		tenantFromBearerAuth{},
-		newValidator(t), fwd, quota.NewCeiling(64), NewOriginPolicy(nil), newEmitter(t), s,
+		newValidator(t), fwd, quota.NewCeiling(64), NewOriginPolicy(nil), NewResolveOnlyPolicy(""), newEmitter(t), s,
 	)
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
@@ -159,7 +159,7 @@ func TestSerializeSlotSpansForwardAndEmit(t *testing.T) {
 	}
 	h, err := NewHandler(
 		tenantFromBearerAuth{},
-		newValidator(t), fwd, quota.NewCeiling(64), NewOriginPolicy(nil), em, serialize.NewSerializer(1, nil),
+		newValidator(t), fwd, quota.NewCeiling(64), NewOriginPolicy(nil), NewResolveOnlyPolicy(""), em, serialize.NewSerializer(1, nil),
 	)
 	if err != nil {
 		t.Fatalf("handler: %v", err)

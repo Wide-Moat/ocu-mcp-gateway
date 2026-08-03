@@ -79,8 +79,21 @@ try:
         print("Error: Found " + str(count) + " occurrences of old_str in " + path + ". Add more surrounding context to make it unique.")
         sys.exit(1)
     new_content = content.replace(old_str, new_str, 1)
-    with open(path, 'w') as f:
+    # Reopen for update and truncate EXPLICITLY rather than opening with 'w'.
+    # 'w' asks the kernel for O_TRUNC at open time, and the outputs mount does
+    # not serve that: the call comes back EIO and the edit is lost, on a surface
+    # where reading and creating both work. Seeking to 0, writing, then
+    # truncating to the new length asks for the same end state through
+    # operations the mount does serve.
+    # truncate() with no argument cuts at the CURRENT position, which is exactly
+    # where the write ended. Passing a computed byte length instead would assume
+    # the bytes written equal len(new_content.encode()) — false wherever newline
+    # translation is in effect, and there it cuts off the tail of what was just
+    # written. No argument depends on nothing.
+    with open(path, 'r+') as f:
+        f.seek(0)
         f.write(new_content)
+        f.truncate()
     print("Successfully replaced text in " + path)
 except Exception as e:
     print("Error: " + str(e))
