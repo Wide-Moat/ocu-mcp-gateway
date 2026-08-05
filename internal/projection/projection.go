@@ -45,7 +45,15 @@ try:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, 'w') as f:
+    # 'w' asks the kernel for O_TRUNC at open time, and the outputs mount does not
+    # serve that: the call comes back EIO and the create is lost whenever the path
+    # ALREADY EXISTS, on a surface where creating a new file works. Open without
+    # truncation and cut separately, the same shape StrReplaceScript uses.
+    # ftruncate runs BEFORE the write because the write is buffered: cutting after
+    # would discard what was just written wherever the buffer had not yet flushed.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+    with os.fdopen(fd, 'w') as f:
+        os.ftruncate(fd, 0)
         f.write(file_text)
     print("Successfully created " + path)
 except Exception as e:
