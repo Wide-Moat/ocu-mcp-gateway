@@ -19,9 +19,15 @@ not copied) or an absolute, revision-pinned URL.
 |---|---|
 | Source repo | `Wide-Moat/open-computer-use` |
 | Branch | `next/v1` |
-| Pinned commit | `099d3d76d6d8a8e5bec6f46b989c6b9a9246c375` |
-| Commit subject | `feat(contracts): freeze the north Files-API bodies (ADR-0028, closes #304) (#323)` |
-| Pinned date | 2026-07-01 |
+| Pinned commit | `552e4ea7c9fe98678f071e336df916159b111573` |
+| Commit subject | `feat(contracts): freeze the gateway authz policy schema (ADR-0041) (#383)` |
+| Pinned date | 2026-08-07 |
+
+> **Re-pinned forward** from `099d3d7` to `552e4ea` for the ADR-0041 authz policy:
+> `gateway-authz-policy.schema.json` is NOT reachable from `099d3d7` — that
+> revision predates the schema landing on `next/v1`. All four previously
+> vendored files hash identically at both pins, so this re-pin carries no
+> content drift; it only widens what is reachable.
 
 > **Re-pinned forward** from `26c6749` (#314) to `099d3d7` for P4: the frozen
 > `mcp-key-set.schema.json` (the ADR-0027 Control→gateway hashed-key boot-set, PR
@@ -39,7 +45,7 @@ not copied) or an absolute, revision-pinned URL.
 To re-verify any row below against the pinned canon:
 
 ```sh
-git -C <open-computer-use> rev-parse 099d3d76d6d8a8e5bec6f46b989c6b9a9246c375:<path>
+git -C <open-computer-use> rev-parse 552e4ea7c9fe98678f071e336df916159b111573:<path>
 # the printed git blob OID must equal the "Blob OID" column
 ```
 
@@ -77,11 +83,13 @@ canon (the git blob OID matches), so its provenance is mechanically checkable.
 | OCU Audit fan-in (AsyncAPI 3.0.0) — F10 OCSF emit | `contracts/audit/audit-fanin.asyncapi.yaml` | `contracts/audit/audit-fanin.asyncapi.yaml` | `6beb0cab568c44572f0eec756f8028335cda2288` |
 | F5 session-setup wire (proto3, gRPC) — Create/Route/Destroy | `contracts/proto/ocu/control/session/v1/session_setup.proto` | `contracts/proto/ocu/control/session/v1/session_setup.proto` | `3ebd2c93dc303a4dd47b39c5ef81f3cde959b73b` |
 | MCP hashed-key-set (Control → gateway boot-set, ADR-0027) | `contracts/mcp/mcp-key-set.schema.json` | `contracts/mcp/mcp-key-set.schema.json` | `25329b0f572b049ed593d5bc7fe14f74980b0091` |
+| Gateway per-action authz policy (deployment → gateway boot-load, ADR-0041) | `contracts/authz/gateway-authz-policy.schema.json` | `contracts/authz/gateway-authz-policy.schema.json` | `8e34bac4631883d66f73725a0d7a605ec4511465` |
 
 SHA-256 of the vendored copies:
 - `ocu-constraints.schema.json`: `3ba7d9c2c4be1ccd4ffd0371c7b76db00b6d9a8cb0a1f7474966a7e0f2534c7e`
 - `audit-fanin.asyncapi.yaml`: `0c82d163b152ca3e5d8e31e89b892b012b9ccaf6a8170393bb875f5deb7e5114`
 - `session_setup.proto`: `10d96e6a597a629aaddfbc3ff2c6f6adccc86acaa577dae63321cddf5d5c7dcc`
+- `gateway-authz-policy.schema.json`: `21e4fadfbf69d222b7e2cd014be2d4627d8d1195dbb655a23a319c14de4b846b`
 - `mcp-key-set.schema.json`: `0672c4da86354a98bfead570a57c865d25d0c64ef1609420ad5ba214a1af621d`
 
 > The gateway emits ONLY on the `mcpGatewayAudit` channel

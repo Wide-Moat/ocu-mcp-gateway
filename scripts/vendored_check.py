@@ -40,6 +40,7 @@ VENDORED = {
     "contracts/audit/audit-fanin.asyncapi.yaml": "6beb0cab568c44572f0eec756f8028335cda2288",  # gitleaks:allow (git blob OID, not a secret)
     "contracts/proto/ocu/control/session/v1/session_setup.proto": "3ebd2c93dc303a4dd47b39c5ef81f3cde959b73b",  # gitleaks:allow (git blob OID, not a secret)
     "contracts/mcp/mcp-key-set.schema.json": "25329b0f572b049ed593d5bc7fe14f74980b0091",  # gitleaks:allow (git blob OID, not a secret)
+    "contracts/authz/gateway-authz-policy.schema.json": "8e34bac4631883d66f73725a0d7a605ec4511465",  # gitleaks:allow (git blob OID, not a secret)
 }
 
 
@@ -100,6 +101,35 @@ def self_test():
         if git_blob_oid(mutated) == want:
             print(f"::error::self-test: a mutation of {path} did NOT change its blob OID (gate is a no-op)", file=sys.stderr)
             sys.exit(1)
+
+    # The dict above and the "Vendored as a file" table in VENDORED.md are two
+    # hand-maintained lists of the same set. A file recorded in the table but
+    # missing from the dict is vendored and UNGUARDED — the gate would report a
+    # confident green while never hashing it — so the lockstep the dict's comment
+    # asks for is checked here rather than trusted.
+    table = set()
+    with open(os.path.join(ROOT, "VENDORED.md"), encoding="utf-8") as f:
+        for line in f:
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+            # A vendored-file row is: name | canon path | vendored path | blob OID.
+            if len(cells) == 4 and cells[3].isalnum() and len(cells[3]) == 40:
+                table.add(cells[2])
+    if not table:
+        print("::error::self-test: parsed no rows from VENDORED.md; the table's shape "
+              "changed and an empty set would satisfy every comparison", file=sys.stderr)
+        sys.exit(1)
+    missing = table - set(VENDORED)
+    if missing:
+        print(f"::error::self-test: {sorted(missing)} recorded in VENDORED.md but absent "
+              f"from this script — vendored and unguarded", file=sys.stderr)
+        sys.exit(1)
+    extra = set(VENDORED) - table
+    if extra:
+        print(f"::error::self-test: {sorted(extra)} checked by this script but absent from "
+              f"VENDORED.md — guarded with no provenance record", file=sys.stderr)
+        sys.exit(1)
 
     print("vendored-check self-test: shipped files match; a mutation reds the gate (RED-when-tampered, GREEN-as-shipped)")
 
