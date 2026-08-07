@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/authz"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/quota"
@@ -113,6 +114,48 @@ func newValidator(t *testing.T) *profile.Validator {
 	return v
 }
 
+// testPolicy is the permissive baseline a deployment gets when it supplies no
+// policy of its own: every advertised tool granted, file verbs bounded to the
+// documented workspace prefixes. Tests that assert a FORWARD happens need it,
+// because the zero Policy denies every call by design.
+//
+// It is built through Load, not hand-assembled, so a test cannot silently rely
+// on a policy shape the loader would reject.
+func testPolicy(t *testing.T) authz.Policy {
+	t.Helper()
+	const doc = `{
+	  "version": 1,
+	  "profiles": {
+	    "full": {
+	      "tools": {
+	        "bash_tool": {},
+	        "view": {"path_prefixes": ["/home/assistant/", "/mnt/user-data/", "/tmp/"]},
+	        "create_file": {"path_prefixes": ["/home/assistant/", "/mnt/user-data/outputs/", "/tmp/"]},
+	        "str_replace": {"path_prefixes": ["/home/assistant/", "/mnt/user-data/outputs/", "/tmp/"]},
+	        "resolve_scope": {}
+	      }
+	    }
+	  },
+	  "default_profile": "full"
+	}`
+	p, err := authz.Load([]byte(doc), advertisedToolNames())
+	if err != nil {
+		t.Fatalf("build the test policy: %v", err)
+	}
+	return p
+}
+
+// advertisedToolNames is the served set, read from the same embedded tool list
+// the allowlist derives from, so the test policy cannot name a tool the gateway
+// does not advertise.
+func advertisedToolNames() []string {
+	out := make([]string, 0, len(allowedToolNames))
+	for name := range allowedToolNames {
+		out = append(out, name)
+	}
+	return out
+}
+
 // newTestHandler builds a Handler with the given authenticator, a real validator,
 // a fail-closed forwarder, and a generous ceiling. It is the default wiring for
 // boundary-order tests that only vary the auth outcome.
@@ -122,5 +165,5 @@ func newTestHandler(t *testing.T, authn auth.CallerAuthenticator) *Handler {
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }

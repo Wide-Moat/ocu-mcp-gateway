@@ -69,7 +69,7 @@ func handlerWithSerializer(t *testing.T, fwd forward.Forwarder, s *serialize.Ser
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 // tenantFromBearerAuth resolves a caller whose Tenant IS the bearer, so a test
@@ -164,6 +164,7 @@ func TestSerializeSlotSpansForwardAndEmit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	h = h.WithPolicy(testPolicy(t))
 
 	done := make(chan int, 1)
 	go func() { done <- post(h, pinnedProtocolVersion, "t-same", validToolCall).Code }()
