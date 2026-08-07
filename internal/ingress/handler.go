@@ -55,12 +55,11 @@ const protocolVersionHeader = "MCP-Protocol-Version"
 // Every boundary fails closed (invariant #9): a non-success at any step refuses
 // the request and forwards nothing.
 type Handler struct {
-	authn       auth.CallerAuthenticator
-	validator   *profile.Validator
-	forwarder   forward.Forwarder
-	ceiling     *quota.Ceiling
-	origin      OriginPolicy
-	resolveOnly ResolveOnlyPolicy
+	authn     auth.CallerAuthenticator
+	validator *profile.Validator
+	forwarder forward.Forwarder
+	ceiling   *quota.Ceiling
+	origin    OriginPolicy
 	// authz is the deployment-supplied per-action policy (ADR-0041, NFR-SEC-49).
 	// The ZERO value denies every call, so a deployment that wires no policy
 	// refuses rather than serving unchecked — the same fail-closed direction the
@@ -85,7 +84,7 @@ func NewHandler(authn auth.CallerAuthenticator, validator *profile.Validator, fo
 	if authn == nil || validator == nil || forwarder == nil || ceiling == nil || emitter == nil || serializer == nil {
 		return nil, errors.New("ingress: NewHandler requires non-nil authn, validator, forwarder, ceiling, emitter, and serializer (fail-closed)")
 	}
-	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling, origin: origin, resolveOnly: resolveOnly, emitter: emitter, serializer: serializer}, nil
+	return &Handler{authn: authn, validator: validator, forwarder: forwarder, ceiling: ceiling, origin: origin, emitter: emitter, serializer: serializer}, nil
 }
 
 // ServeHTTP routes the MCP JSON-RPC POST surface. Only POST is accepted; the
@@ -247,36 +246,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name := toolNameFrom(raw)
 	if !allowedToolNames[name] {
 		writeRPCErrorWithID(w, idFrom(raw), http.StatusOK, rpcInvalidParams, "unimplemented tool")
-		return
-	}
-
-	// (4d) Resolve-only caller confinement — deployment policy on the RESOLVED
-	// credential. An embedding portal holds a gateway credential for one purpose:
-	// to learn which storage scope a chat belongs to. Tool execution is not part of
-	// that purpose, so a deployment can bind that credential to resolve_scope and
-	// nothing else, and a leak of the portal's configuration then buys an attacker
-	// a scope lookup rather than a guest shell. The check sits HERE because it is
-	// the first point where both halves of the decision are trustworthy: the caller
-	// is auth-resolved (KeyID from the record, never a body claim) and the tool name
-	// is profile-validated and allowlisted. Refusing before the serializer and the
-	// forward means a confined caller acquires no session slot and Control
-	// materializes no session for a call it must never execute — the same
-	// no-side-effect posture the allowlist above keeps. The refusal echoes the id
-	// (post-parse, issue #38) and its message is a fixed reason class carrying no
-	// caller-derived value (invariant #5).
-	if h.resolveOnly.Restricted(caller.KeyID) && name != resolveScopeToolName {
-		// A confined credential reaching for a tool it may not call is a
-		// terminated request with a validated identity, so it is recorded (§XI)
-		// durable-first before the 403. The deliberate omission in that rule is
-		// the PRE-auth boundary, where no caller is resolved yet; this refusal
-		// sits after authentication and names the actor, so it belongs with the
-		// ceiling and forward refusals rather than with the transport-layer ones.
-		// A credential probing for authority it does not have is exactly the
-		// event an operator needs in the trail.
-		if !h.recordRefusal(w, r, idFrom(raw), caller.KeyID, boundedResource(name)) {
-			return
-		}
-		writeRPCErrorWithID(w, idFrom(raw), http.StatusForbidden, rpcInvalidRequest, "tool not permitted for this caller")
 		return
 	}
 

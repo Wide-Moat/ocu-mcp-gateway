@@ -291,6 +291,12 @@ func serve(ctx context.Context, o options) error {
 	if perr != nil {
 		return fmt.Errorf("authz policy: %w", perr)
 	}
+	// The -resolve-only-key-ids flag is sugar that compiles to caller bindings on
+	// the policy above (ADR-0041), so the confinement runs through the one
+	// evaluator rather than through a second mechanism beside it. A caller the
+	// policy already binds is left alone: the document an operator wrote is the
+	// source of truth, and the flag abbreviates it rather than overriding it.
+	policy = ingress.CompileResolveOnly(policy, resolveOnly)
 
 	// Build the F10 OCSF audit sink and emitter. A configured -audit-sink is the
 	// fleet-aligned durable FILE sink: it appends each OCSF envelope as one

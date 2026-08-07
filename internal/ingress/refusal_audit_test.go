@@ -247,7 +247,10 @@ func TestConfinementRefusalIsRecorded(t *testing.T) {
 	sink := &recordingSink{}
 	fwd := &recordingForwarder{}
 	h := refusalHandler(t, fwd, nil, sink)
-	h.resolveOnly = NewResolveOnlyPolicy("t-actor")
+	// The confinement is a compiled caller binding now (ADR-0041), not a field the
+	// request path reads. Setting h.resolveOnly alone would leave the handler
+	// unconfined and this test asserting against a mechanism nothing consults.
+	h = h.WithPolicy(CompileResolveOnly(testPolicy(t), NewResolveOnlyPolicy("t-actor")))
 
 	rec := post(h, pinnedProtocolVersion, "t-actor", validToolCall)
 	if rec.Code != http.StatusForbidden {
