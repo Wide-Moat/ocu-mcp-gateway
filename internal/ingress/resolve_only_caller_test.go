@@ -51,7 +51,7 @@ func resolveOnlyHandler(t *testing.T, fwd forward.Forwarder, keyID, restrictedKe
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 // TestResolveOnlyCallerRefusedForExecutingTool is the keystone: a confined

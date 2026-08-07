@@ -35,6 +35,7 @@ import (
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/authz"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/boot"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/config"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
@@ -76,6 +77,11 @@ type options struct {
 	// embedding portal's credential to a scope lookup without re-minting it (see
 	// ingress.ResolveOnlyPolicy). Empty restricts nobody.
 	resolveOnlyKeyIDs string
+	// authzPolicyPath is the deployment-supplied per-action authorization policy
+	// (ADR-0041). Empty selects the committed baseline, so a deployment that
+	// configures nothing runs today's surface under an auditable rule set rather
+	// than under an absence.
+	authzPolicyPath string
 
 	// F5 guarded-construction knobs (§III): the gateway's own service credential,
 	// the deployment provisioning policy, and the mTLS-1.3 client material for the
@@ -121,6 +127,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.auditBus, "audit-bus", "", "durable audit-bus endpoint (F10 OCSF fan-in over a network bus; not yet wired — a future follow-up, contract #150)")
 	fs.StringVar(&o.auditSink, "audit-sink", "", "durable OCSF audit file (append-only newline-delimited JSON, fsync-before-ack); the fleet-aligned F10 sink. Empty AND empty -audit-bus fails closed on every emit")
 	fs.IntVar(&o.serializeDepth, "serialize-max-depth", 64, "max queued tool-calls per session before refusal (NFR-IC-05 per-session serializer; DoS guard on the session key)")
+	fs.StringVar(&o.authzPolicyPath, "authz-policy", "", "path to the per-action authorization policy (ADR-0041). Empty uses the committed permissive baseline; a path that cannot be read or does not validate FAILS BOOT rather than falling back")
 	fs.StringVar(&o.resolveOnlyKeyIDs, "resolve-only-key-ids", "", "comma-separated key ids confined to the resolve_scope tool (e.g. -resolve-only-key-ids=portal-a,portal-b); such a caller may learn a chat's storage scope and execute no tool. Empty restricts nobody")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
@@ -268,6 +275,23 @@ func serve(ctx context.Context, o options) error {
 	// leaving every other caller untouched. Unset restricts nobody.
 	resolveOnly := ingress.NewResolveOnlyPolicy(o.resolveOnlyKeyIDs)
 
+	// The authorization policy (ADR-0041). A configured path that cannot be read
+	// or does not validate FAILS BOOT: falling back to the baseline would run a
+	// surface the operator did not choose while they believed their file was in
+	// force, which is the one outcome worse than either posture alone.
+	policyDoc := ingress.BaselineAuthzPolicy
+	if o.authzPolicyPath != "" {
+		doc, rerr := os.ReadFile(o.authzPolicyPath)
+		if rerr != nil {
+			return fmt.Errorf("read authz policy %q: %w", o.authzPolicyPath, rerr)
+		}
+		policyDoc = doc
+	}
+	policy, perr := authz.Load(policyDoc, ingress.AdvertisedToolNames())
+	if perr != nil {
+		return fmt.Errorf("authz policy: %w", perr)
+	}
+
 	// Build the F10 OCSF audit sink and emitter. A configured -audit-sink is the
 	// fleet-aligned durable FILE sink: it appends each OCSF envelope as one
 	// newline-delimited JSON line and fsyncs BEFORE the emit returns, so a forward
@@ -305,6 +329,7 @@ func serve(ctx context.Context, o options) error {
 	if err != nil {
 		return fmt.Errorf("serve: build handler: %w", err)
 	}
+	handler = handler.WithPolicy(policy)
 
 	// Wrap the MCP handler with the unauthenticated /healthz readiness gate. The
 	// gate reports ready iff the boot Sequencer is ready (boot-set loaded); serving

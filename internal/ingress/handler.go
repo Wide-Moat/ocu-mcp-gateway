@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
+	"github.com/Wide-Moat/ocu-mcp-gateway/internal/authz"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/forward"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/profile"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/projection"
@@ -60,8 +61,13 @@ type Handler struct {
 	ceiling     *quota.Ceiling
 	origin      OriginPolicy
 	resolveOnly ResolveOnlyPolicy
-	emitter     *audit.Emitter
-	serializer  *serialize.Serializer
+	// authz is the deployment-supplied per-action policy (ADR-0041, NFR-SEC-49).
+	// The ZERO value denies every call, so a deployment that wires no policy
+	// refuses rather than serving unchecked — the same fail-closed direction the
+	// nil-seam checks above take.
+	authz      authz.Policy
+	emitter    *audit.Emitter
+	serializer *serialize.Serializer
 }
 
 // NewHandler wires the handler from its seams. The authenticator, validator,
@@ -271,6 +277,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeRPCErrorWithID(w, idFrom(raw), http.StatusForbidden, rpcInvalidRequest, "tool not permitted for this caller")
+		return
+	}
+
+	// (4e) Per-action authorization (ADR-0041, NFR-SEC-49). Deny-by-default on
+	// (caller, tool, arguments), evaluated HERE: after the name is allowlisted, so
+	// a policy rule is never consulted for a name the gateway does not serve, and
+	// before the serializer and the forward, so a denied call acquires no session
+	// slot and Control materializes nothing for a call it must never execute. The
+	// refusal is recorded durable-first for the same reason as (4d): a credential
+	// reaching for authority it lacks is the event an operator needs in the trail.
+	//
+	// The message is a fixed reason class carrying no caller-derived value: the
+	// evaluator's own error names the profile and tool, which are deployment
+	// declarations, but echoing an agent-supplied path onto this surface would
+	// hand a prober a confirmation oracle for paths it guessed.
+	if err := h.authz.Decide(caller.KeyID, name, toolArgumentsFrom(raw)); err != nil {
+		if !h.recordRefusal(w, r, idFrom(raw), caller.KeyID, boundedResource(name)) {
+			return
+		}
+		writeRPCErrorWithID(w, idFrom(raw), http.StatusForbidden, rpcInvalidRequest, "action not permitted by policy")
 		return
 	}
 
@@ -514,6 +540,55 @@ func toolNameFrom(raw []byte) string {
 	}
 	_ = json.Unmarshal(raw, &msg)
 	return msg.Params.Name
+}
+
+// WithPolicy binds the deployment-supplied authorization policy (ADR-0041).
+//
+// It is a separate step rather than a ninth constructor parameter because the
+// policy is the only seam a DEPLOYMENT supplies as a document: the others are
+// wired objects. Keeping it distinct means the boot path reads as "build the
+// handler, then bind the policy the operator provided", and a boot that skips
+// the bind leaves a handler whose zero Policy denies every call — visible
+// immediately rather than as a permissive surface.
+//
+// A handler with no policy bound is not a permissive handler. Decide refuses on
+// the zero value, so the failure direction of forgetting this call is refusal.
+func (h *Handler) WithPolicy(p authz.Policy) *Handler {
+	h.authz = p
+	return h
+}
+
+// toolArgumentsFrom reads params.arguments as a flat map for the authz gate
+// (ADR-0041). It decodes ONE level: the policy language's only argument
+// predicate reads a top-level string, so decoding deeper would build a surface
+// the policy cannot express and a reader cannot audit.
+//
+// An unreadable body yields an EMPTY map rather than a partial one. Decide
+// refuses any tool carrying a predicate when the argument is absent, so the
+// failure lands on the deny side; inventing an argument the caller never sent
+// would decide the call on fabricated input.
+func toolArgumentsFrom(raw []byte) map[string]any {
+	var msg struct {
+		Params struct {
+			Arguments map[string]json.RawMessage `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil || msg.Params.Arguments == nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(msg.Params.Arguments))
+	for k, v := range msg.Params.Arguments {
+		// Only a JSON string becomes a value the predicate can compare. A number,
+		// object or array is carried as nil, so a tool whose predicate needs a
+		// string sees "unreadable" rather than a coerced stand-in.
+		var str string
+		if json.Unmarshal(v, &str) == nil {
+			out[k] = str
+			continue
+		}
+		out[k] = nil
+	}
+	return out
 }
 
 // toolCallFrom extracts the forwarded ToolCall from the validated raw body. The

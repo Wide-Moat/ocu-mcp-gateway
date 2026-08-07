@@ -72,12 +72,23 @@ func TestUnadvertisedToolNameNotForwarded(t *testing.T) {
 // tools_list.json (no client-facing discovery entry — it is invoked directly by
 // the D5 client, not chosen by the model from tools/list).
 func TestAdvertisedToolNamesStillForward(t *testing.T) {
+	// Each tool is called with arguments its POLICY rule can evaluate. The file
+	// verbs carry a path inside a granted prefix: this test is about the NAME
+	// allowlist not regressing, so an argument-scoped denial here would be the
+	// wrong test failing (that property has its own coverage in internal/authz).
+	args := map[string]string{
+		"bash_tool":     `{"command":"true"}`,
+		"create_file":   `{"path":"/home/assistant/x","file_text":"hi"}`,
+		"str_replace":   `{"path":"/home/assistant/x","old_str":"a","new_str":"b"}`,
+		"view":          `{"path":"/home/assistant/x"}`,
+		"resolve_scope": `{}`,
+	}
 	for _, name := range []string{"bash_tool", "create_file", "str_replace", "view", "resolve_scope"} {
 		t.Run(name, func(t *testing.T) {
 			fwd := &recordingForwarder{resp: forward.SessionResponse{Correlation: "c1"}}
 			h := acceptingHandler(t, fwd, nil)
 
-			body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":{}}}`
+			body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args[name] + `}}`
 			rec := post(h, pinnedProtocolVersion, "sk-ocu-good", body)
 
 			if fwd.got == nil {

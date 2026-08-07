@@ -76,7 +76,7 @@ func refusalHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceiling,
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 // eventsWithStatusID returns the OCSF events whose status_id equals want (the

@@ -58,6 +58,7 @@ func TestServeServesAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	h = h.WithPolicy(testPolicy(t))
 	srv := NewServer(ln, h)
 
 	ctx, cancel := context.WithCancel(context.Background())

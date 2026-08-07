@@ -51,7 +51,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 // Invariant #6 — protocol-version pin. A missing or mismatched MCP-Protocol-
@@ -197,6 +197,7 @@ func TestF10_AuditWriteFailureIsRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	h = h.WithPolicy(testPolicy(t))
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", validToolCall)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("a forward that succeeds but whose audit write fails must be refused (500), got %d", rec.Code)
@@ -218,6 +219,7 @@ func TestF10_AuditActorIsHostAttested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	h = h.WithPolicy(testPolicy(t))
 	bodyWithClaim := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash_tool","arguments":{"command":"true"},"caller":"admin"}}`
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", bodyWithClaim)
 	if rec.Code != http.StatusOK {
