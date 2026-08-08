@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "profiles": {
+    "full": {
+      "tools": {
+        "bash_tool": {},
+        "create_file": {
+          "path_prefixes": [
+            "/home/assistant/",
+            "/mnt/user-data/outputs/",
+            "/tmp/"
+          ]
+        },
+        "str_replace": {
+          "path_prefixes": [
+            "/home/assistant/",
+            "/mnt/user-data/outputs/",
+            "/tmp/"
+          ]
+        },
+        "view": {
+          "path_prefixes": [
+            "/home/assistant/",
+            "/mnt/user-data/",
+            "/tmp/"
+          ]
+        },
+        "resolve_scope": {}
+      }
+    },
+    "resolve-only": {
+      "tools": {
+        "resolve_scope": {}
+      }
+    }
+  },
+  "default_profile": "full"
+}

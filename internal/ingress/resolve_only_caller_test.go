@@ -51,7 +51,10 @@ func resolveOnlyHandler(t *testing.T, fwd forward.Forwarder, keyID, restrictedKe
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}
-	return h
+	// Compile the flag into the policy exactly as the boot path does. Binding an
+	// uncompiled policy here would test a wiring production does not have, and the
+	// confinement would appear broken when only the fixture was.
+	return h.WithPolicy(CompileResolveOnly(testPolicy(t), NewResolveOnlyPolicy(restrictedKeyIDs)))
 }
 
 // TestResolveOnlyCallerRefusedForExecutingTool is the keystone: a confined
