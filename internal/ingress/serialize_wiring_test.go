@@ -5,6 +5,7 @@ package ingress
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync"
 	"testing"
@@ -179,7 +180,7 @@ func TestSerializeSlotSpansForwardAndEmit(t *testing.T) {
 		t.Fatalf("request must succeed, got %d", code)
 	}
 	// After release: forward returned, emit ran under the same slot, then the slot
-	// released. Exactly one record for the settled call.
+	// released. Exactly one API-Activity record for the settled call.
 	if got := sink.Count(); got != 1 {
 		t.Errorf("after the slot-holding call settles, exactly one audit record must have landed; got %d", got)
 	}
@@ -192,10 +193,19 @@ type countingSink struct {
 	n  int
 }
 
-func (s *countingSink) Publish(context.Context, string, []byte) error {
-	s.mu.Lock()
-	s.n++
-	s.mu.Unlock()
+func (s *countingSink) Publish(_ context.Context, _ string, payload []byte) error {
+	// Count only API-Activity (6003) records: the slot governs the forward-then-
+	// emit ordering of the tool-call record, and the caller-key logon (3002)
+	// deliberately fires at auth, OUTSIDE the slot. Counting it here would make
+	// "no record yet under the held slot" a lie about the logon rather than the
+	// forward record the test is about — and, worse, would let a 6003 that
+	// escaped the slot hide behind the logon.
+	var doc map[string]any
+	if err := json.Unmarshal(payload, &doc); err == nil && doc["class_uid"] == float64(6003) {
+		s.mu.Lock()
+		s.n++
+		s.mu.Unlock()
+	}
 	return nil
 }
 
