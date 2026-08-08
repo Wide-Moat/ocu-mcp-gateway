@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Generated code is out of scope for the hand-written-source SAST gate: it is
+# authored by the protobuf/grpc generators (buf), reviewed as the frozen .proto
+# contract, not as Go source. Its findings are properties of the generator's
+# output; the real transport security lives in the hand-written mTLS forward
+# path (internal/forward), which stays in scope.
+gen/

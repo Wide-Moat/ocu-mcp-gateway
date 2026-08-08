@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Generate the session-setup gRPC CLIENT into the gateway's own module. The
+# vendored proto's go_package targets ocu-control; the managed override
+# re-homes the generated package under this module so the gateway does not
+# import ocu-control's gen/. Local vendor-backed plugins, no remote codegen.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/Wide-Moat/ocu-mcp-gateway/gen/proto
+plugins:
+  - local: protoc-gen-go
+    out: ../../gen/proto
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: ../../gen/proto
+    opt: paths=source_relative
