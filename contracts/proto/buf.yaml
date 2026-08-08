@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# buf module for the vendored control-plane proto the gateway CALLS. The proto
+# is vendored byte-identical from ocu-control (its go_package points at
+# ocu-control's module); the gateway generates a CLIENT into its OWN module via
+# a go_package override in buf.gen.yaml, so it depends on the frozen WIRE
+# CONTRACT, not on ocu-control's generated Go package.
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - DEFAULT
+  except:
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

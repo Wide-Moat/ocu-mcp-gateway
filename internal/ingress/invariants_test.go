@@ -51,7 +51,7 @@ func acceptingHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceilin
 	if err != nil {
 		t.Fatalf("build handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 // Invariant #6 — protocol-version pin. A missing or mismatched MCP-Protocol-
@@ -197,6 +197,7 @@ func TestF10_AuditWriteFailureIsRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	h = h.WithPolicy(testPolicy(t))
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", validToolCall)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("a forward that succeeds but whose audit write fails must be refused (500), got %d", rec.Code)
@@ -218,21 +219,45 @@ func TestF10_AuditActorIsHostAttested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
+	h = h.WithPolicy(testPolicy(t))
 	bodyWithClaim := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bash_tool","arguments":{"command":"true"},"caller":"admin"}}`
 	rec := post(h, pinnedProtocolVersion, "sk-ocu-x", bodyWithClaim)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("happy path must be 200, got %d", rec.Code)
 	}
-	if len(sink.payloads) != 1 {
-		t.Fatalf("expected 1 audit event, got %d", len(sink.payloads))
-	}
-	s := string(sink.payloads[0])
+	// The success path emits an api-activity (6003) AND, on an unlatched request,
+	// a caller-key logon (3002). This test is about the 6003 actor, so pick it
+	// out by class rather than by position.
+	s := onlyAPIActivity(t, sink.payloads)
 	if !strings.Contains(s, "resolved-key-9") {
 		t.Error("audit actor must be the host-attested resolved KeyID")
 	}
 	if strings.Contains(s, "admin") {
 		t.Error("a body-supplied caller claim must NOT appear in the audit actor (NFR-SEC-09)")
 	}
+}
+
+// onlyAPIActivity returns the single class-6003 payload, failing if there is not
+// exactly one — a 6003 is emitted once per forwarded request, and a second would
+// be a duplicate-attribution bug the logon must not be allowed to hide.
+func onlyAPIActivity(t *testing.T, payloads [][]byte) string {
+	t.Helper()
+	var found string
+	var n int
+	for _, raw := range payloads {
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal audit payload: %v", err)
+		}
+		if doc["class_uid"] == float64(6003) {
+			n++
+			found = string(raw)
+		}
+	}
+	if n != 1 {
+		t.Fatalf("expected exactly 1 API-Activity (6003) event, got %d", n)
+	}
+	return found
 }
 
 // Sanity: the NewHandler constructor is fail-closed on any nil seam (admit-all /

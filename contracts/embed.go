@@ -16,3 +16,12 @@ import _ "embed"
 //
 //go:embed mcp/mcp-key-set.schema.json
 var MCPKeySetSchema []byte
+
+// GatewayAuthzPolicySchema is the frozen deployment-supplied per-action
+// authorization policy schema (contracts/authz/gateway-authz-policy.schema.json,
+// ADR-0041). The boot loader validates the deployment's policy document against
+// this before evaluating a single call, so a malformed policy fails boot rather
+// than silently denying or admitting at the first request.
+//
+//go:embed authz/gateway-authz-policy.schema.json
+var GatewayAuthzPolicySchema []byte

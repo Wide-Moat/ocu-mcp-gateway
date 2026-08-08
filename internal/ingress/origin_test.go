@@ -30,7 +30,7 @@ func handlerWithOrigin(t *testing.T, allowed []string) *Handler {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 func TestOriginPolicyAllows(t *testing.T) {

@@ -24,9 +24,9 @@ import (
 // success path. A self-audit found NO refusal path emitted: the only Emit was the
 // OutcomeSuccess one after a successful forward, so canon spec line 64/75
 // ("emit per terminated request … plus a rejection event on a ceiling refusal",
-// NFR-SEC-03) was unmet. Pre-auth refusals (401 auth-fail, 403 origin) have no
-// resolved caller at that boundary order and are a DELIBERATE transport-layer
-// omission — asserted below to stay non-emitting so the exclusion is pinned too.
+// NFR-SEC-03) was unmet. The 401 auth-failure emits its own Authentication
+// (3002) failure logon on a separate path; the 403 origin refusal evaluates no
+// credential and stays a DELIBERATE transport-layer omission — asserted below.
 
 // recordingSink captures every emitted OCSF payload so a test can assert the
 // outcome/actor of a refusal event, not just the count.
@@ -76,7 +76,7 @@ func refusalHandler(t *testing.T, fwd forward.Forwarder, ceiling *quota.Ceiling,
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	return h
+	return h.WithPolicy(testPolicy(t))
 }
 
 // eventsWithStatusID returns the OCSF events whose status_id equals want (the
@@ -178,12 +178,18 @@ func TestRefusalAuditIsFailClosed(t *testing.T) {
 	}
 }
 
-// TestPreAuthRefusalsDoNotEmit pins the deliberate exclusion: 401 (auth-fail)
-// and 403 (origin) fire BEFORE a caller is resolved, so they have no attested
-// actor and MUST NOT emit a per-request OCSF event (a placeholder actor would be
-// false attribution — worse than omission). This is a documented transport-layer
-// omission, not a gap; the test keeps it from silently acquiring an emit.
-func TestPreAuthRefusalsDoNotEmit(t *testing.T) {
+// TestOriginRefusalStaysSilentAnd401EmitsOnly3002 carries forward the live half
+// of the old pre-auth-omission invariant, narrowed by the contract's 1.2.0
+// Authentication addition:
+//
+//   - a 401 auth-failure NOW emits an Authentication (3002) failure logon — a
+//     failed logon's absent principal is the record's content, not a
+//     placeholder — but MUST NOT emit an API-Activity (6003) event, which would
+//     be the false attribution the old rule forbade.
+//   - a 403 origin refusal evaluates no credential (a 3002 would fabricate an
+//     authentication act) and resolves no caller (a 6003 would fabricate
+//     attribution), so it stays silent.
+func TestOriginRefusalStaysSilentAnd401EmitsOnly3002(t *testing.T) {
 	// 401: reject-all auth.
 	sink401 := &recordingSink{}
 	em, err := audit.NewEmitter(sink401)
@@ -197,11 +203,24 @@ func TestPreAuthRefusalsDoNotEmit(t *testing.T) {
 	if rec := post(h401, pinnedProtocolVersion, "sk-ocu-bad", validToolCall); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", rec.Code)
 	}
-	if n := len(sink401.events()); n != 0 {
-		t.Errorf("a 401 auth-failure must NOT emit an OCSF event (no attested actor); got %d", n)
+	var n3002, n6003 int
+	for _, doc := range sink401.events() {
+		switch doc["class_uid"] {
+		case float64(3002):
+			n3002++
+		case float64(6003):
+			n6003++
+		}
+	}
+	if n3002 != 1 {
+		t.Errorf("a 401 emitted %d Authentication (3002) events, want 1", n3002)
+	}
+	if n6003 != 0 {
+		t.Errorf("a 401 emitted %d API-Activity (6003) events; a refusal with no "+
+			"resolved caller must never attribute an action", n6003)
 	}
 
-	// 403: a disallowed Origin, refused before auth.
+	// 403: a disallowed Origin, refused before auth — no credential evaluated.
 	sink403 := &recordingSink{}
 	h403 := refusalHandler(t, &recordingForwarder{}, nil, sink403)
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(validToolCall))
@@ -214,7 +233,8 @@ func TestPreAuthRefusalsDoNotEmit(t *testing.T) {
 		t.Fatalf("want 403, got %d", recW.Code)
 	}
 	if n := len(sink403.events()); n != 0 {
-		t.Errorf("a 403 origin refusal (pre-auth, no attested actor) must NOT emit an OCSF event; got %d", n)
+		t.Errorf("a 403 origin refusal evaluates no credential and resolves no "+
+			"caller, so it emits neither 3002 nor 6003; got %d event(s)", n)
 	}
 }
 
@@ -227,12 +247,20 @@ func TestSuccessStillRecorded(t *testing.T) {
 	if rec := post(h, pinnedProtocolVersion, "t-ok", validToolCall); rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rec.Code)
 	}
-	events := sink.events()
-	if len(events) != 1 {
-		t.Fatalf("success must record exactly one event, got %d", len(events))
+	// A forwarded success emits its api-activity (6003); an unlatched request also
+	// emits a caller-key logon (3002). This test is about the forward record, so
+	// scope to 6003 rather than counting all events.
+	var apiEvents []map[string]any
+	for _, e := range sink.events() {
+		if e["class_uid"] == float64(6003) {
+			apiEvents = append(apiEvents, e)
+		}
 	}
-	if events[0]["status_id"] != float64(1) {
-		t.Errorf("the success event must map to OCSF Success, got %v", events[0]["status"])
+	if len(apiEvents) != 1 {
+		t.Fatalf("success must record exactly one API-Activity event, got %d", len(apiEvents))
+	}
+	if apiEvents[0]["status_id"] != float64(1) {
+		t.Errorf("the success event must map to OCSF Success, got %v", apiEvents[0]["status"])
 	}
 }
 
@@ -247,7 +275,10 @@ func TestConfinementRefusalIsRecorded(t *testing.T) {
 	sink := &recordingSink{}
 	fwd := &recordingForwarder{}
 	h := refusalHandler(t, fwd, nil, sink)
-	h.resolveOnly = NewResolveOnlyPolicy("t-actor")
+	// The confinement is a compiled caller binding now (ADR-0041), not a field the
+	// request path reads. Setting h.resolveOnly alone would leave the handler
+	// unconfined and this test asserting against a mechanism nothing consults.
+	h = h.WithPolicy(CompileResolveOnly(testPolicy(t), NewResolveOnlyPolicy("t-actor")))
 
 	rec := post(h, pinnedProtocolVersion, "t-actor", validToolCall)
 	if rec.Code != http.StatusForbidden {
