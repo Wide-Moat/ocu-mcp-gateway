@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,6 +52,23 @@ const (
 // collide with or read the key.
 type channelKey struct{}
 
+// authnLatchKey carries the once-per-connection logon latch on the base context
+// the ConnContext hook creates. The connection's own lifetime is the latch's
+// lifetime — no map, no eviction.
+type authnLatchKey struct{}
+
+// withAuthnLatch attaches a fresh logon latch to a per-connection context.
+func withAuthnLatch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, authnLatchKey{}, new(atomic.Bool))
+}
+
+// authnLatchFrom reads the connection's latch, or nil for a request that did
+// not arrive through the listener hook.
+func authnLatchFrom(ctx context.Context) *atomic.Bool {
+	l, _ := ctx.Value(authnLatchKey{}).(*atomic.Bool)
+	return l
+}
+
 // Server runs the MCP gateway HTTP transport on a bound listener until its
 // context is cancelled. It is constructed by the boot wiring AFTER the auth
 // boot-set and profile validator are loaded, and only from the readiness hook,
@@ -79,6 +97,7 @@ func (s *Server) httpServer(ctx context.Context) *http.Server {
 		ReadTimeout:       readTimeout,
 		IdleTimeout:       idleTimeout,
 		ConnContext: func(connCtx context.Context, _ net.Conn) context.Context {
+			connCtx = withAuthnLatch(connCtx)
 			return context.WithValue(connCtx, channelKey{}, true)
 		},
 		BaseContext: func(net.Listener) context.Context { return ctx },

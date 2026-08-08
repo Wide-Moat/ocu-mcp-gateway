@@ -4,6 +4,7 @@
 package ingress
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/audit"
 	"github.com/Wide-Moat/ocu-mcp-gateway/internal/auth"
@@ -64,9 +66,13 @@ type Handler struct {
 	// The ZERO value denies every call, so a deployment that wires no policy
 	// refuses rather than serving unchecked — the same fail-closed direction the
 	// nil-seam checks above take.
-	authz      authz.Policy
-	emitter    *audit.Emitter
-	serializer *serialize.Serializer
+	authz   authz.Policy
+	emitter *audit.Emitter
+	// logonDropped counts caller-key logon records the emit refused. The trail is
+	// fail-open (NFR-SEC-88), so a loss must be counted rather than silent — the
+	// ops surface reads this as an alarm.
+	logonDropped atomic.Int64
+	serializer   *serialize.Serializer
 }
 
 // NewHandler wires the handler from its seams. The authenticator, validator,
@@ -127,12 +133,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	caller, err := h.authn.Authenticate(r.Context(), cred)
 	if err != nil {
-		// A failed authentication is a 401 with the relying-party challenge; the
-		// reason is a stable class, never the cause detail (invariant #5).
+		// A failed caller key is observable nowhere but the gateway (Control sees
+		// only the gateway's own mTLS identity), so record it here — every
+		// failure, never latched. Fail-open: the logon record does not decide the
+		// request's outcome, and its own error is only counted (NFR-SEC-88). The
+		// cause is a stable class on the wire (invariant #5) but the trail carries
+		// the resolved reason for the reviewer.
+		_ = h.emitLogon(r, audit.OutcomeFailure, "", authnCause(err))
 		w.Header().Set("WWW-Authenticate", `Bearer realm="ocu-mcp-gateway"`)
 		writeRPCError(w, http.StatusUnauthorized, rpcInvalidRequest, "unauthenticated")
 		return
 	}
+	// A resolved caller authenticated on this connection: record one logon per
+	// connection (the latch), fail-open, so the trail is not multiplied by the
+	// request rate.
+	h.emitLogonOnce(r, caller.KeyID)
 
 	// (2b) Per-caller connection ceiling — invariant #8. Keyed on the RESOLVED
 	// caller identity, so it runs strictly AFTER auth (the ceiling is "per
@@ -380,10 +395,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // return without writing the original refusal code (a refusal we could not record
 // becomes a 500, never a silently-unrecorded rejection).
 //
-// Pre-auth refusals (401 auth-fail, 403 origin) do NOT call this: at their
-// boundary order no caller is resolved, so there is no attested actor to record.
-// That omission is deliberate (a placeholder actor would be false attribution);
-// it is documented on the audit package and pinned by TestPreAuthRefusalsDoNotEmit.
+// Pre-auth refusals do NOT call this: at their boundary order no caller is
+// resolved, so there is no attested actor for an API-Activity (6003) record —
+// a placeholder actor would be false attribution. The 401 auth-failure DOES
+// emit its own Authentication (3002) failure logon (a failed logon's absent
+// principal is the record's content, not a placeholder), which is a different
+// class on a different code path; the 403 origin refusal evaluates no credential
+// and stays silent. Pinned by TestOriginRefusalStaysSilent and the 401 logon
+// tests.
 //
 // id is the request id to echo on the fail-closed 500 this writes when the refusal
 // cannot be recorded. It is the parsed request id on the forward-refused path (known,
@@ -585,3 +604,77 @@ func toolCallFrom(raw []byte) forward.ToolCall {
 		Stdin:     stdin,
 	}
 }
+
+// emitLogon publishes one caller-key authentication event, fail-open: a refused
+// record is counted (via the emitter's own error surfacing) but never changes
+// the request's outcome. The presented key never reaches the record — the
+// AuthnEnvelope's own guard refuses key material, and the cause here is the
+// resolved reason, not the bearer.
+func (h *Handler) emitLogon(r *http.Request, outcome audit.Outcome, actorID, detail string) error {
+	env := audit.AuthnEnvelope{
+		TraceID:       newCorrelationID(),
+		ConnID:        connIDFrom(r.Context()),
+		ActorID:       actorID,
+		Outcome:       outcome,
+		FailureDetail: detail,
+	}
+	if err := h.emitter.EmitAuthn(r.Context(), env); err != nil {
+		// Fail-open with counted loss (NFR-SEC-88): the request's outcome does not
+		// depend on whether its logon recorded, but a loss is counted so it is an
+		// alarm, not a silent gap.
+		h.logonDropped.Add(1)
+		return err
+	}
+	return nil
+}
+
+// emitLogonOnce records a success logon at most once per connection, keyed on
+// the connection latch the listener hook stamps. A request that arrived through
+// no hook (no latch) records every time — an extra observation, never a lost
+// one.
+//
+// A FAILED emit does not hold the latch: the trail does not have this logon, so
+// the next request on the connection must try again rather than treat the loss
+// as recorded.
+func (h *Handler) emitLogonOnce(r *http.Request, actorID string) {
+	latch := authnLatchFrom(r.Context())
+	if latch != nil && !latch.CompareAndSwap(false, true) {
+		return
+	}
+	if err := h.emitLogon(r, audit.OutcomeSuccess, actorID, ""); err != nil && latch != nil {
+		latch.Store(false)
+	}
+}
+
+// authnCause maps an authenticator error to a reviewer-facing reason that is
+// stable and key-free BY CONSTRUCTION. A known sentinel maps to its own stable
+// string; anything else degrades to a generic class rather than forwarding a
+// raw error that a future authenticator might have wrapped the bearer into.
+//
+// Degrading the DETAIL, not dropping the record, is the point: the AuthnEnvelope
+// render guard would drop a key-bearing record entirely, and "every failure with
+// its cause" (NFR-SEC-88) must not lose exactly the interesting event to a
+// leaky wrapper. The guard stays as the fail-closed net behind this.
+func authnCause(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, auth.ErrUnauthenticated):
+		return "caller key not in the boot-loaded set"
+	default:
+		return "caller authentication failed"
+	}
+}
+
+// connIDFrom reads the host-assigned connection identity, empty for an unhooked
+// request.
+func connIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(connIDKey{}).(string)
+	return id
+}
+
+type connIDKey struct{}
+
+// LogonsDropped is how many caller-key logon records the emit refused since the
+// handler was built. A counted loss is an alarm, not a log line nobody reads.
+func (h *Handler) LogonsDropped() int64 { return h.logonDropped.Load() }
